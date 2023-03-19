@@ -47,7 +47,6 @@ def remove_overlap(window, window_length):
         raise TypeError
     temp_frame = window.copy()
     for i1 in window.itertuples():
-        #window_interval = pd.Interval(i1.start_time - pd.Timedelta('1h30m'), i1.start_time + pd.Timedelta('30m'))
         window_interval = pd.Interval(i1.start_time - window_length, i1.start_time + pd.Timedelta('30m'))
         for i2 in window.itertuples():
             if i1.Index == i2.Index:
@@ -72,20 +71,21 @@ def add_window_bounds(window, window_length):
         end_time = each.start_time + pd.Timedelta('30m') 
         start_time_list.append(start_time)
         end_time_list.append(end_time)
-        #duration_list.append(end_time - start_time)
         values_list.append(each.value_inc_vat)
-    #df = pd.DataFrame({'start_time':start_time_list, 'end_time': end_time_list, 'duration': duration_list, 'value_inc_vat': values_list})
     df = pd.DataFrame({'start_time':start_time_list, 'end_time': end_time_list, 'value_inc_vat': values_list})
     return df
 
+
+# If we want to look up the users region etc we probably need to use the authenticated API
+# For now though, I don't need to.
 # account_number = api_key.account_number
 # api_key = api_key.api_key
 
 base_url = "https://api.octopus.energy/v1/"
 product_code = "AGILE-FLEX-22-11-25"
-tariff_code = "E-1R-AGILE-FLEX-22-11-25-A" # curl -u "$API_KEY:" https://api.octopus.energy/v1/products/AGILE-FLEX-22-11-25
+
+tariff_code = "E-1R-AGILE-FLEX-22-11-25-A" # https://api.octopus.energy/v1/products/AGILE-FLEX-22-11-25
 agile_price_url = base_url + "products/" + product_code + "/electricity-tariffs/" + tariff_code + "/standard-unit-rates/"
-#agile_price_url += "?period_from=" + start_of_next_period().isoformat() + "Z"
 agile_price_url += "?period_from=" + datetime.datetime.now().isoformat() + "Z"
 
 print("URL: " + agile_price_url)
@@ -117,14 +117,9 @@ two_hour_windows = remove_overlap(two_hour_windows, pd.Timedelta('1h30m'))
 four_hour_windows = remove_overlap(four_hour_windows, pd.Timedelta('3h30m'))
 two_hour_windows = add_window_bounds(two_hour_windows, pd.Timedelta('1h30m'))
 four_hour_windows = add_window_bounds(four_hour_windows, pd.Timedelta('3h30m'))
-print(two_hour_windows)
-print(four_hour_windows)
-
 
 # Find the 30 min slots which are cheaper than the average price:
 cheapest_30min_slots = prices.sort_values(by="value_inc_vat").drop(prices[prices.value_inc_vat > avg_price].index)
-print("Cheapest 30 min slots:")
-print(cheapest_30min_slots)
 
 print("----------\n\n\n")
 print(f"Minimum price: {min_price['value_inc_vat'].values[0]} at {min_price.start_time.values[0]} until {min_price['end_time'].values[0]}")
@@ -133,7 +128,7 @@ print(f"Average price: {str(avg_price)}")
 print(f"Average 2 hour cost: {str(two_hour_windows.mean(numeric_only=True).values[0])}")
 print(f"Average 4 hour cost: {str(four_hour_windows.mean(numeric_only=True).values[0])}")
 
-# I don't think we actually care about consecutive slots.  Leaving this here for later in case we do.
+# I'll use this to optimise the 30 min charging slots to combine consecutive 30 min slots in to one charging period on the inverter
 # Perhaps 1hr slots would be useful later.
 #consecutive_cheap_slots = thirtymin_cheap_slots.copy().sort_values(by="start_time")
 #consecutive_cheap_slots['grp_time'] = consecutive_cheap_slots.end_time.diff().dt.seconds.gt(1800).cumsum()
@@ -142,17 +137,20 @@ print(f"Average 4 hour cost: {str(four_hour_windows.mean(numeric_only=True).valu
 #print("consecutive_cheap_slots sorted by value")
 #print(consecutive_cheap_slots)
 
-
-
-
 final_slots = pd.DataFrame()
 final_slots = pd.concat([two_hour_windows, four_hour_windows, cheapest_30min_slots])
 final_slots['duration'] = final_slots.end_time - final_slots.start_time
 final_slots.sort_values(inplace=True, by='value_inc_vat')
 final_slots.reset_index(inplace=True, drop=True)
-print("Final slots:")
+print("\nFinal slots:")
 print(final_slots)
 
+print("---------")
+print("Cheapest times:")
+print(f"2 hour slot:\n{two_hour_windows.head(1)}")
+print(f"\n4 hour slot:\n{four_hour_windows.head(1)}")
+print(f"\n30 min slot:\n{cheapest_30min_slots.head(1)}")
+print(f"\nCheapest 2 hour non-consecutive price: {cheapest_30min_slots.head(4).mean(numeric_only=True).values[0]}")
 # Now we have:
 # - Cheapest 2 hour consecutive slots
 # - Cheapest 4 hour consecutive slots
