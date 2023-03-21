@@ -2,7 +2,7 @@
 
 The goal is to automate the charging of a Growatt SPH connected battery to ensure that it is ready for use during the peak periods and to make best use of cheaper periods of electricity,
 
-I'm using partly as an exercise to learn Pandas (so please suggest improvements to the Pandas usage), partly to save a few quid and partly to help save the world (generally speaking; cheap electricity is green electricity)
+I'm using this partly as an exercise to learn Pandas (so please suggest improvements to the Pandas usage), partly to save a few quid and partly to help save the world (generally speaking; cheap electricity is green electricity)
 
 It will use PyModBus to control the inverter.
 
