@@ -23,23 +23,169 @@
 # I want to charge in continuous slots or I'm happy with bursts.
 
 
-
+import sys
 import requests
 import pandas as pd
 import datetime
+from argparse import ArgumentParser
 try:
     from pymodbus.client import ModbusTcpClient
 except:
     print("If you want to control your inverter with this script you need to install pymodbus")
     MODBUS = False
 
-# import api_key
+# import api_key # If we need to use the authenticated API, then we need an API key.  Store it in this file instead of in here.
 
 battery_size = 16 # kWh
 max_ac_charge_rate = 2.7 # kW
-inverter_ip = 'ew11-1'
+inverter_addr = 'ew11-1'
 cheap = 15 # p/kWh anything below this is cheap.
 # Get gas price from Octopus API.  If electricity is cheaper than gas then use electricity to heat water.
+
+class Prices:
+    def __init__(self):
+        base_url = "https://api.octopus.energy/v1/"
+        product_code = "AGILE-FLEX-22-11-25"
+        tariff_code = "E-1R-AGILE-FLEX-22-11-25-A" # https://api.octopus.energy/v1/products/AGILE-FLEX-22-11-25
+        agile_price_url = base_url + "products/" + product_code + "/electricity-tariffs/" + tariff_code + "/standard-unit-rates/"
+        agile_price_url += "?period_from=" + datetime.datetime.now().isoformat() + "Z"
+        print("URL: " + agile_price_url)
+        r = requests.get(agile_price_url)
+        self.prices_dict = r.json()
+        self.two_hour_windows = None
+        self.four_hour_windows = None
+        self.cheapest_30min_slots = None
+        self.economy_slots = None
+        self.build_dataframe()
+    def build_dataframe(self):
+        start_time    = pd.DatetimeIndex(x['valid_from'] for x in self.prices_dict['results'])
+        end_time      = pd.DatetimeIndex(x['valid_to'] for x in self.prices_dict['results'])
+        value_inc_vat = [x['value_inc_vat'] for x in self.prices_dict['results']]
+        self.prices = pd.DataFrame({'start_time':start_time, 'end_time': end_time, 'value_inc_vat': value_inc_vat})
+        self.prices.sort_values(by="start_time", inplace=True)
+        self.min_price = self.prices[self.prices.value_inc_vat == self.prices.value_inc_vat.min()] # Keep it as a frame to keep the start and end times
+        self.max_price = self.prices[self.prices.value_inc_vat == self.prices.value_inc_vat.max()]
+        self.avg_price = self.prices.mean(numeric_only=True).values[0]
+        print("Min price: " + str(self.min_price))
+        print("Max price: " + str(self.max_price))
+        print("Avg price: " + str(self.avg_price))
+    def get_two_hour_windows(self):
+        if self.two_hour_windows is not None:
+            return self.two_hour_windows
+        two_hour_windows = self.prices.rolling('2h', min_periods=4, on='start_time').mean()
+        two_hour_windows.dropna(inplace=True)
+        two_hour_windows.sort_values(by='value_inc_vat', inplace=True)
+        two_hour_windows.drop(two_hour_windows[two_hour_windows.value_inc_vat > self.avg_price].index, inplace=True)
+        two_hour_windows = remove_overlap(two_hour_windows, pd.Timedelta('1h30m'))
+        two_hour_windows = add_window_bounds(two_hour_windows, pd.Timedelta('1h30m'))
+        self.two_hour_windows = two_hour_windows
+        return self.two_hour_windows
+    def get_four_hour_windows(self):
+        if self.four_hour_windows is not None:
+            return self.four_hour_windows
+        four_hour_windows = self.prices.rolling('4h', min_periods=8, on='start_time').mean()
+        four_hour_windows.dropna(inplace=True)
+        four_hour_windows.sort_values(by='value_inc_vat', inplace=True)
+        four_hour_windows.drop(four_hour_windows[four_hour_windows.value_inc_vat > self.avg_price].index, inplace=True)
+        four_hour_windows = remove_overlap(four_hour_windows, pd.Timedelta('3h30m'))
+        four_hour_windows = add_window_bounds(four_hour_windows, pd.Timedelta('3h30m'))
+        self.four_hour_windows = four_hour_windows
+        # If the average 4 hour unit price is lower than "cheap" then reset cheap to be the average 4 hour unit price.
+        global cheap
+        if four_hour_windows.value_inc_vat.mean() < cheap:
+            cheap = four_hour_windows.value_inc_vat.mean()
+        return self.four_hour_windows
+    def get_cheapest_30min_slots(self):
+        if self.cheapest_30min_slots is not None:
+            return self.cheapest_30min_slots
+        if self.four_hour_windows is None:
+            self.get_four_hour_windows()
+        cheapest_30min_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > cheap].index)
+        cheapest_30min_slots = remove_overlap(cheapest_30min_slots, pd.Timedelta('30m'))
+        cheapest_30min_slots = add_window_bounds(cheapest_30min_slots, pd.Timedelta('30m'))
+        self.cheapest_30min_slots = cheapest_30min_slots
+        return cheapest_30min_slots
+    def get_economy_slots(self):
+        if self.economy_slots is not None:
+            return self.economy_slots
+        if self.cheapest_30min_slots is None:
+            self.get_cheapest_30min_slots()
+        index = pd.DatetimeIndex(self.cheapest_30min_slots.start_time)
+        economy_slots = self.cheapest_30min_slots.iloc[index.indexer_between_time('19:00', '07:00')].sort_values(by="start_time")
+        economy_slots.sort_values(by="start_time", inplace=True)
+        economy_slots.reset_index(drop=True, inplace=True)
+        economy_slots['grp_time'] = economy_slots.end_time.diff().dt.seconds.gt(1800).cumsum()
+        economy_slots = economy_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
+        #TODO: Re-run the slot merge stuff to merge hours now.  30min adjoining slots are now 1 hour slots, but the 1 hr slots might adjoin too.
+        economy_slots.reset_index(drop=True, inplace=True)
+        self.economy_slots = economy_slots
+        print(economy_slots)
+        return economy_slots
+    
+def program_charging_schedule(slot_list):
+    sync_inverter_time()
+    zero_charging_slots()
+    client = ModbusTcpClient(inverter_addr)
+    client.connect()
+    a,b = [],[]
+    for slot in slot_list[0:3]:
+        a.extend(slot)
+    for slot in slot_list[3:6]:
+        b.extend(slot)
+    print(a)
+    print(b)
+    client.write_registers(1100, a, slave=1)
+    client.write_registers(1018, b, slave=1)
+    client.close()
+
+def set_economy_charging(prices):
+    print("Setting economy charging")
+    economy_slots = prices.get_economy_slots()
+    print(economy_slots)
+    charging_slots_list = []
+    for r in economy_slots.itertuples():
+        start_hour = int(r.start_time.strftime('%H'))
+        start_minute = int(r.start_time.strftime('%M'))
+        end_hour = int(r.end_time.strftime('%H'))
+        end_minute = int(r.end_time.strftime('%M'))
+        print(f"Charging from {start_hour}:{start_minute} to {end_hour}:{end_minute}")
+        encoded_start_time = start_hour << 8 | start_minute
+        encoded_end_time = end_hour << 8 | end_minute
+        print(f"Encoded start time: {encoded_start_time}")
+        print(f"Encoded end time: {encoded_end_time}")
+        charging_slots_list.append([encoded_start_time, encoded_end_time, 1])
+    program_charging_schedule(charging_slots_list)
+
+
+
+def parse_args():
+    parser = ArgumentParser(description="Control Growatt SPH inverters and batteries to charge the battery at the cheapest time possible using Agile Octopus.")
+    programming_group = parser.add_argument_group("Charge Programming")
+    programming_group.add_argument("-z", "--zero", dest="zero", help="Zero out the battery charging schedule", action="store_true")
+    programming_group.add_argument("-d", "--duration", dest="duration", help="Set the duration of the charge in minutes.  Default is 240 (4 hours)", default=240, type=int)
+    programming_group.add_argument("-st", "--start-time", dest="start_time", help="Set the earliest time to search for a slot for the charge. ", type=datetime.datetime.fromisoformat)
+    programming_group.add_argument("-et", "--end-time", dest="end_time", help="Set the latest time to search for a slot for the charge.  Default is now + 4 hours", type=datetime.datetime.fromisoformat)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("-e", "--economy", dest="economy", help="Program the cheapest over-night charging schedule possible", action="store_true")
+    mode_group.add_argument("-4", "--4hour", dest="4hour", help="Program the cheapest 4 hour charging schedule possible", action="store_true")
+    mode_group.add_argument("-2", "--2hour", dest="2hour", help="Program the cheapest 2 hour charging schedule possible", action="store_true")
+
+    config_group = parser.add_argument_group("Configuration")
+    config_group.add_argument("-c", "--cheap", dest="cheap", help="Set the threshold for cheap electricity in p/kWh.  Default is 15", type=float)
+    config_group.add_argument("-i", "--inverter", dest="inverter", help="Set the inverter address.  Default is ew11-1", default='ew11-1')
+    #config_group.add_argument("-b", "--battery", dest="battery", help="Set the battery size in kWh.  Default is 16kWh", default=16, type=int)
+    config_group.add_argument("-r", "--rate", dest="rate", help="Set the maximum AC charge rate in kW.  Default is 100%%", default=100, type=int)
+    config_group.add_argument("-D", "--debug", dest="debug", help="Enable debug output", action="store_true")
+
+    info_group = parser.add_argument_group("Information")
+    info_group.add_argument("-v", "--version", dest="version", help="Print version information", action="store_true")
+    info_group.add_argument("-C", "--soc", dest="soc", help="Return state of charge of the battery in %%", action="store_true")
+    info_group.add_argument("-S", "--schedule", dest="schedule", help="Return the current charging schedule", action="store_true")
+    info_group.add_argument("-P", "--prices", dest="prices", help="Return the current Agile prices", action="store_true")
+        
+    args = parser.parse_args()
+    print(args)
+    return args
 
 
 def start_of_next_period():
@@ -75,7 +221,6 @@ def add_window_bounds(window, window_length):
     # need optimising as it's a small amount of data.
     start_time_list = []
     end_time_list   = []
-    duration_list   = []
     values_list     = []
     
     for each in window.itertuples():
@@ -89,37 +234,26 @@ def add_window_bounds(window, window_length):
 
 def get_battery_soc():
     # Battery state of charge s held in register 1014
-    client = ModbusTcpClient(inverter_ip)
+    client = ModbusTcpClient(inverter_addr)
     client.connect()
     results = client.read_input_registers(1014, 1, slave=1)
     client.close()
     return results.registers[0]
 
 def sync_inverter_time():
-    client = ModbusTcpClient(inverter_ip)
+    client = ModbusTcpClient(inverter_addr)
     client.connect()
-    results = client.read_holding_registers(45, 7, slave=1)
-    year, month, day, hour, minute, second, dow = results.registers
     system_now = datetime.datetime.now()
-    inverter_now = datetime.datetime(year, month, day, hour, minute, second)
-
-    if system_now > inverter_now:
-        difference = (system_now - inverter_now).seconds
-    elif system_now < inverter_now:
-        difference = (inverter_now - system_now).seconds
-
-    if difference > 30:
-        print("Setting inverter time to system time")
-        result = client.write_registers(45, [system_now.year-2000, system_now.month, system_now.day, system_now.hour, system_now.minute, system_now.second], slave=1)
+    result = client.write_registers(45, [system_now.year-2000, system_now.month, system_now.day, system_now.hour, system_now.minute, system_now.second], slave=1)
     client.close()
 
 def get_current_charging_slots():
-    client = ModbusTcpClient(inverter_ip)
+    client = ModbusTcpClient(inverter_addr)
     client.connect()
     charging_slots = []
     charging_slots.extend(client.read_holding_registers(1100, 9, slave=1).registers)
     charging_slots.extend(client.read_holding_registers(1018, 9, slave=1).registers) # Looks like the docs are wrong here. 1018 is the start of the charging slots not 1017 
-    charge_level = client.read_holding_registers(1091, 1, slave=1).registers[0]
+    charge_limit = client.read_holding_registers(1091, 1, slave=1).registers[0]
     ac_charge_enabled = client.read_holding_registers(1092, 1, slave=1).registers[0]
     client.close()
 
@@ -132,17 +266,16 @@ def get_current_charging_slots():
 
     for each in charge_slots_list:
         print(f"Slot: {each[0]} - {each[1]} Enabled: {each[2]}")
-    
-    # print(f"Slot 1: {slot1_start_h:02d}:{slot1_start_m:02d} - {slot1_end_h:02d}:{slot1_end_m:02d} Enabled: {slot1_enabled}")
-    # print(f"Slot 2: {slot2_start_h:02d}:{slot2_start_m:02d} - {slot2_end_h:02d}:{slot2_end_m:02d} Enabled: {slot2_enabled}")
-    # print(f"Slot 3: {slot3_start_h:02d}:{slot3_start_m:02d} - {slot3_end_h:02d}:{slot3_end_m:02d} Enabled: {slot3_enabled}")
-    # print(f"Slot 4: {slot4_start_h:02d}:{slot4_start_m:02d} - {slot4_end_h:02d}:{slot4_end_m:02d} Enabled: {slot4_enabled}")
-    # print(f"Slot 5: {slot5_start_h:02d}:{slot5_start_m:02d} - {slot5_end_h:02d}:{slot5_end_m:02d} Enabled: {slot5_enabled}")
-    # print(f"Slot 6: {slot6_start_h:02d}:{slot6_start_m:02d} - {slot6_end_h:02d}:{slot6_end_m:02d} Enabled: {slot6_enabled}")
-    print(f"Charge Level: {charge_level}")
+
+    print(f"Charge Limit: {charge_limit}")
     print(f"AC Charge Enabled: {ac_charge_enabled}")
 
-
+def zero_charging_slots():
+    client = ModbusTcpClient(inverter_addr)
+    client.connect()
+    result = client.write_registers(1100, [0]*9, slave=1)
+    result = client.write_registers(1018, [0]*9, slave=1)
+    client.close()
 
 def get_solar_production_tomorrow():
     url = "https://api.forecast.solar/estimate/watthours/day/52.1322466021396/-0.21998598515728754/27/-80/6.720"
@@ -157,6 +290,30 @@ def get_solar_production_tomorrow():
 # For now though, I don't need to.
 # account_number = api_key.account_number
 # api_key = api_key.api_key
+
+def main():
+    args = parse_args()
+    if args.inverter:
+        inverter_addr = args.inverter
+        print(inverter_addr)
+    if args.zero:
+        zero_charging_slots()
+    if args.cheap:
+        global cheap
+        cheap = args.cheap
+    if args.schedule:
+        get_current_charging_slots()
+    if args.economy:
+        prices = Prices()
+        set_economy_charging(prices)
+
+    sys.exit()
+
+
+if __name__ == "__main__":
+    main()
+
+
 
 base_url = "https://api.octopus.energy/v1/"
 product_code = "AGILE-FLEX-22-11-25"
@@ -229,7 +386,7 @@ overnight_charge.reset_index(inplace=True, drop=True)
 print(overnight_charge)
 # Run consecutive 30 min slots together
 overnight_charge['grp_time'] = overnight_charge.end_time.diff().dt.seconds.gt(1800).cumsum()
-overnight_charge = overnight_charge.groupby('grp_time').agg({'value_inc_vat': 'mean', 'start_time':min, 'end_time': 'max'})
+overnight_charge = overnight_charge.groupby('grp_time').agg({'value_inc_vat': 'mean', 'start_time':'min', 'end_time': 'max'})
 print(overnight_charge)
 
 charging_slots_list = []
@@ -251,11 +408,9 @@ print(charging_slots_list)
 a = input("Press Y & enter to program the inverter")
 if a == 'Y' or a == 'y':
     sync_inverter_time()
-    client = ModbusTcpClient(inverter_ip)
+    zero_charging_slots()
+    client = ModbusTcpClient(inverter_addr)
     client.connect()
-    blank = [0,0,0,0,0,0,0,0,0]
-    result = client.write_registers(1100, blank, slave=1)
-    result = client.write_registers(1100, blank, slave=1)
     a,b = [],[]
     for slot in charging_slots_list[0:3]:
         print(slot)
@@ -272,19 +427,6 @@ if a == 'Y' or a == 'y':
     client.close()
 else:
     print("Not programming the inverter")
-
-
-
-
-
-
-
-
-
-
-#consecutive_cheap_slots.sort_values(by='value_inc_vat', inplace=True)
-#print("consecutive_cheap_slots sorted by value")
-#print(consecutive_cheap_slots)
 
 
 
@@ -353,4 +495,5 @@ else:
 print(f"Battery state of charge: {get_battery_soc()}%")
 #print(f"Solar generation tomorrow: {get_solar_production_tomorrow()}")
 get_current_charging_slots()
-
+#zero_charging_slots()
+#get_current_charging_slots()

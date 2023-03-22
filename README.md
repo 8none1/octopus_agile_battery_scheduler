@@ -8,6 +8,10 @@ It will use PyModBus to control the inverter.
 
 ## Current state
 
+### 2023-03-22
+
+Started to add proper cli options to build a proper tool rather than a script that does one job.  It's untidy but I will fix that later.
+
 ### 2023-03-21
 
 As well as the longer slots below, the script now calculates the cheapest 30 min slots between 7PM and 7AM and can automatically program the inverter to enable charging for those slots.  This is the first real step towards fully automatic charging.
