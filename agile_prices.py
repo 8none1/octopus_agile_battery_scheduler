@@ -28,27 +28,42 @@ import requests
 import pandas as pd
 import datetime
 from argparse import ArgumentParser
+from influxdb_client import InfluxDBClient
+from influxdb_client.client.write_api import SYNCHRONOUS
+
 try:
     from pymodbus.client import ModbusTcpClient
 except:
     print("If you want to control your inverter with this script you need to install pymodbus")
     MODBUS = False
 
-# import api_key # If we need to use the authenticated API, then we need an API key.  Store it in this file instead of in here.
+import api_key # If we need to use the authenticated API, then we need an API key.  Store it in this file instead of in here. Also store other secret things in here.
 
 battery_size = 16 # kWh
 max_ac_charge_rate = 2.7 # kW
 inverter_addr = 'ew11-1'
 cheap = 15 # p/kWh anything below this is cheap.
 # Get gas price from Octopus API.  If electricity is cheaper than gas then use electricity to heat water.
+prices = None
+start_time = None
+end_time = None
+
+
+
 
 class Prices:
     def __init__(self):
+        global start_time
+        global end_time
         base_url = "https://api.octopus.energy/v1/"
         product_code = "AGILE-FLEX-22-11-25"
         tariff_code = "E-1R-AGILE-FLEX-22-11-25-A" # https://api.octopus.energy/v1/products/AGILE-FLEX-22-11-25
         agile_price_url = base_url + "products/" + product_code + "/electricity-tariffs/" + tariff_code + "/standard-unit-rates/"
-        agile_price_url += "?period_from=" + datetime.datetime.now().isoformat() + "Z"
+        if start_time is not None:
+            agile_price_url += "?period_from=" + start_time.isoformat() + "Z"
+            #agile_price_url += "?period_from=" + datetime.datetime.now().isoformat() + "Z"
+        if end_time is not None:
+            agile_price_url += "&period_to=" + end_time.isoformat() + "Z"
         print("URL: " + agile_price_url)
         r = requests.get(agile_price_url)
         self.prices_dict = r.json()
@@ -66,9 +81,17 @@ class Prices:
         self.min_price = self.prices[self.prices.value_inc_vat == self.prices.value_inc_vat.min()] # Keep it as a frame to keep the start and end times
         self.max_price = self.prices[self.prices.value_inc_vat == self.prices.value_inc_vat.max()]
         self.avg_price = self.prices.mean(numeric_only=True).values[0]
-        print("Min price: " + str(self.min_price))
-        print("Max price: " + str(self.max_price))
-        print("Avg price: " + str(self.avg_price))
+        print("\n")
+        print(f"Min price: {self.min_price.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.min_price.head(1).start_time.values[0]} to {self.min_price.head(1).end_time.values[0]}")
+        print(f"Max price: {self.max_price.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.max_price.head(1).start_time.values[0]} to {self.max_price.head(1).end_time.values[0]}")
+        print(f"Avg price: {self.avg_price:.2f}p/kWh")
+        print("\n")
+        self.get_two_hour_windows()
+        self.get_four_hour_windows()
+        print(f"Cheapest 2 hour window: {self.two_hour_windows.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.two_hour_windows.head(1).start_time.values[0]} to {self.two_hour_windows.head(1).end_time.values[0]}")
+        print(f"Cheapest 4 hour window: {self.four_hour_windows.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.four_hour_windows.head(1).start_time.values[0]} to {self.four_hour_windows.head(1).end_time.values[0]}")
+        print("\n")
+
     def get_two_hour_windows(self):
         if self.two_hour_windows is not None:
             return self.two_hour_windows
@@ -98,11 +121,11 @@ class Prices:
     def get_cheapest_30min_slots(self):
         if self.cheapest_30min_slots is not None:
             return self.cheapest_30min_slots
-        if self.four_hour_windows is None:
-            self.get_four_hour_windows()
+        # if self.four_hour_windows is None:
+        #     self.get_four_hour_windows()
         cheapest_30min_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > cheap].index)
-        cheapest_30min_slots = remove_overlap(cheapest_30min_slots, pd.Timedelta('30m'))
-        cheapest_30min_slots = add_window_bounds(cheapest_30min_slots, pd.Timedelta('30m'))
+        #cheapest_30min_slots = remove_overlap(cheapest_30min_slots, pd.Timedelta('30m'))
+        #cheapest_30min_slots = add_window_bounds(cheapest_30min_slots, pd.Timedelta('30m'))
         self.cheapest_30min_slots = cheapest_30min_slots
         return cheapest_30min_slots
     def get_economy_slots(self):
@@ -114,13 +137,27 @@ class Prices:
         economy_slots = self.cheapest_30min_slots.iloc[index.indexer_between_time('19:00', '07:00')].sort_values(by="start_time")
         economy_slots.sort_values(by="start_time", inplace=True)
         economy_slots.reset_index(drop=True, inplace=True)
+        print(f"1: {economy_slots}")
         economy_slots['grp_time'] = economy_slots.end_time.diff().dt.seconds.gt(1800).cumsum()
+        economy_slots = economy_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
+        print(f"2: {economy_slots}")
+        economy_slots.reset_index(drop=True, inplace=True)
+        economy_slots['grp_time'] = economy_slots.end_time.diff().dt.seconds.gt(3600).cumsum()
         economy_slots = economy_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
         #TODO: Re-run the slot merge stuff to merge hours now.  30min adjoining slots are now 1 hour slots, but the 1 hr slots might adjoin too.
         economy_slots.reset_index(drop=True, inplace=True)
         self.economy_slots = economy_slots
-        print(economy_slots)
+        print(f"3: {economy_slots}")
         return economy_slots
+    def write_to_influxdb(self):
+        # You need the index to be a time column otherwise InfluxDB will not accept it. (e.g. index "0" = epoch zero = 1970-01-01 00:00:00 = a long time ago = outside the RP of the bucket)
+        influx_df = self.prices.set_index('start_time')
+        with InfluxDBClient(url=api_key.influxdb_url, token=api_key.influxdb_token, org=api_key.influxdb_org) as client:
+            write_api = client.write_api(write_options=SYNCHRONOUS)
+            write_api.write(bucket=api_key.influxdb_bucket, record=influx_df, data_frame_measurement_name='agile_prices')
+        print("Prices written to InfluxDB")
+
+
     
 def program_charging_schedule(slot_list):
     sync_inverter_time()
@@ -142,6 +179,7 @@ def set_economy_charging(prices):
     print("Setting economy charging")
     economy_slots = prices.get_economy_slots()
     print(economy_slots)
+    #return True
     charging_slots_list = []
     for r in economy_slots.itertuples():
         start_hour = int(r.start_time.strftime('%H'))
@@ -163,8 +201,8 @@ def parse_args():
     programming_group = parser.add_argument_group("Charge Programming")
     programming_group.add_argument("-z", "--zero", dest="zero", help="Zero out the battery charging schedule", action="store_true")
     programming_group.add_argument("-d", "--duration", dest="duration", help="Set the duration of the charge in minutes.  Default is 240 (4 hours)", default=240, type=int)
-    programming_group.add_argument("-st", "--start-time", dest="start_time", help="Set the earliest time to search for a slot for the charge. ", type=datetime.datetime.fromisoformat)
-    programming_group.add_argument("-et", "--end-time", dest="end_time", help="Set the latest time to search for a slot for the charge.  Default is now + 4 hours", type=datetime.datetime.fromisoformat)
+    programming_group.add_argument("-st", "--start-time", dest="start_time", help="Set the earliest time to search for a slot for the charge.", type=datetime.datetime.fromisoformat)
+    programming_group.add_argument("-et", "--end-time", dest="end_time", help="Set the latest time to search for a slot for the charge.  Default is now + 4 hours. YYYY-MM-DDTHH:MM:SS", type=datetime.datetime.fromisoformat)
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("-e", "--economy", dest="economy", help="Program the cheapest over-night charging schedule possible", action="store_true")
     mode_group.add_argument("-4", "--4hour", dest="4hour", help="Program the cheapest 4 hour charging schedule possible", action="store_true")
@@ -182,7 +220,11 @@ def parse_args():
     info_group.add_argument("-C", "--soc", dest="soc", help="Return state of charge of the battery in %%", action="store_true")
     info_group.add_argument("-S", "--schedule", dest="schedule", help="Return the current charging schedule", action="store_true")
     info_group.add_argument("-P", "--prices", dest="prices", help="Return the current Agile prices", action="store_true")
-        
+    info_group.add_argument("-I", "--influx", dest="influx", help="Write the current prices to InfluxDB", action="store_true")
+    # TODO: Add a dummy run option to just print the schedule and not program the inverter
+    # TODO: Add a "stop charging at soc%" option
+    #     
+
     args = parser.parse_args()
     print(args)
     return args
@@ -292,10 +334,12 @@ def get_solar_production_tomorrow():
 # api_key = api_key.api_key
 
 def main():
+    global prices
+    global start_time
+    global end_time
     args = parse_args()
     if args.inverter:
         inverter_addr = args.inverter
-        print(inverter_addr)
     if args.zero:
         zero_charging_slots()
     if args.cheap:
@@ -303,9 +347,33 @@ def main():
         cheap = args.cheap
     if args.schedule:
         get_current_charging_slots()
+    if args.start_time:
+        start_time = args.start_time
+        if not args.end_time:
+            end_time = start_time + datetime.timedelta(hours=4)
+    if args.end_time:
+        end_time = args.end_time
+        if not args.start_time:
+            start_time = end_time - datetime.timedelta(hours=4)
+    if not args.start_time and not args.end_time:
+        start_time = datetime.datetime.now()
     if args.economy:
-        prices = Prices()
+        if prices is None:
+            prices = Prices()
         set_economy_charging(prices)
+    if args.influx:
+        if prices is None:
+            prices = Prices()
+        prices.write_to_influxdb()
+    if args.prices:
+        if prices is None:
+            prices = Prices()
+        print(prices.prices.to_markdown())
+        print(prices.get_two_hour_windows().to_markdown())
+        print(prices.get_four_hour_windows().to_markdown())
+
+    
+
 
     sys.exit()
 

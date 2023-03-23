@@ -8,6 +8,11 @@ It will use PyModBus to control the inverter.
 
 ## Current state
 
+### 2023-03-23
+
+Added the ability to export prices to InfluxDB.  Fixed a few bugs in the economy scheduler.  Started to really get to grips with what this thing needs to do.
+Lots more work to do.
+
 ### 2023-03-22
 
 Started to add proper cli options to build a proper tool rather than a script that does one job.  It's untidy but I will fix that later.
