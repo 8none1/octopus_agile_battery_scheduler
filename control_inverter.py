@@ -9,7 +9,7 @@ results = client.read_holding_registers(45, 7, slave=1)
 year, month, day, hour, minute, second, dow = results.registers
 print(results.registers)
 
-system_now = datetime.datetime.now()
+system_now = datetime.datetime.utcnow()
 inverter_now = datetime.datetime(year, month, day, hour, minute, second)
 print(system_now)
 print(inverter_now)

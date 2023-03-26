@@ -1,0 +1,6 @@
+api_key = "sk_live_XYZ123abc789"
+account_number = "A-1A111222333"
+influxdb_token = "A7B5F5cccslknskjbshjbs........"
+influxdb_bucket = "abc123def456"
+influxdb_org = "f7d191e4b145f4fc"
+influxdb_url = "https://us-east-1-1.aws.cloud2.influxdata.com"
