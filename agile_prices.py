@@ -52,8 +52,8 @@ inverter_addr = 'ew11-1'
 prices = None
 start_time = None
 end_time = None
-dummy = False
 idle_batt_usage = 5 # percent battery used per hour while house is idle
+
 
 
 
@@ -93,11 +93,13 @@ class Prices:
         print("\n")
         self.get_two_hour_windows()
         self.get_four_hour_windows()
+        self.get_cheapest_30min_slots()
         print(f"Cheapest 2 hour window: {self.two_hour_windows.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.two_hour_windows.head(1).start_time.values[0]} to {self.two_hour_windows.head(1).end_time.values[0]}")
         print(f"Cheapest 4 hour window: {self.four_hour_windows.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.four_hour_windows.head(1).start_time.values[0]} to {self.four_hour_windows.head(1).end_time.values[0]}")
         print("\n")
 
     def get_two_hour_windows(self):
+        # This finds a contiguous 2 hour window that is the cheapest.
         if self.two_hour_windows is not None:
             return self.two_hour_windows
         two_hour_windows = self.prices.rolling('2h', min_periods=4, on='start_time').mean()
@@ -110,6 +112,7 @@ class Prices:
         return self.two_hour_windows
     
     def get_four_hour_windows(self):
+        # This finds a contiguous 4 hour window that is the cheapest.
         if self.four_hour_windows is not None:
             return self.four_hour_windows
         four_hour_windows = self.prices.rolling('4h', min_periods=8, on='start_time').mean()
@@ -120,9 +123,27 @@ class Prices:
         four_hour_windows = add_window_bounds(four_hour_windows, pd.Timedelta('3h30m'))
         self.four_hour_windows = four_hour_windows
         # If the average 4 hour unit price is lower than "cheap" then reset cheap to be the average 4 hour unit price.
-        if four_hour_windows.value_inc_vat.mean() < self.cheap:
-            self.cheap = four_hour_windows.value_inc_vat.mean()
+        #if four_hour_windows.value_inc_vat.mean() < self.cheap:
+        self.cheap = four_hour_windows.value_inc_vat.mean()
         return self.four_hour_windows
+    
+    def get_cheapest_30min_slots(self):
+        # This finds 30 min slots that are cheaper than the average 4 hour unit price.
+        if self.cheapest_30min_slots is not None:
+            return self.cheapest_30min_slots
+        cheapest_30min_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > self.cheap].index)
+        # This self-adjusting cheap price is a bit risky I think. e.g. what if we have two negative slots in a row, it could throw the average. 
+        #  We'll have to see how it goes.  See the four hour window section for how it's calculated.
+        self.cheapest_30min_slots = cheapest_30min_slots
+        return self.cheapest_30min_slots
+    
+    def get_cheapest_n_slots(self, num_slots):
+        # This finds the cheapest 2 hour spread of slots.
+        slots = self.cheapest_30min_slots
+        slots.sort_values(by="value_inc_vat", inplace=True)
+        slots = slots.head(num_slots)
+        slots = slots.reset_index(drop=True)
+        return slots
     
     def get_economy_slots(self):
         # The goal of this function is to return a dataframe of the cheapest slots between 19:00 and 07:00
@@ -130,6 +151,7 @@ class Prices:
         if self.economy_slots is not None:
             return self.economy_slots
         cheap_30min_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > self.cheap].index)
+        self.cheap_30min_slots = cheap_30min_slots
         if cheap_30min_slots.empty:
             print("Error: No cheap slots found.\nThis means that the cheapest four hour slot found was the cheapest overall slot.")
             return cheap_30min_slots# Maybe return the 4 hour slot here?
@@ -155,8 +177,18 @@ class Prices:
             write_api.write(bucket=api_key.influxdb_bucket, record=influx_df, data_frame_measurement_name='agile_prices')
         print("Prices written to InfluxDB")
 
-def write_to_inverter(register, values_list):
-    global dummy
+def merge_slots(slots):
+    # This merges slots that are contiguous. It means that we use fewer programming slots on the inverter.
+    # Each slot must be the same duration.
+    duration = slots.head(1).end_time - slots.head(1).start_time
+    slots.sort_values(by="start_time", inplace=True)
+    slots.reset_index(drop=True, inplace=True)
+    slots['grp_time'] = slots.end_time.diff().dt.seconds.gt(duration.dt.seconds[0]).cumsum()    
+    slots = slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
+    slots = slots.reset_index(drop=True)
+    return slots
+
+def write_to_inverter(register, values_list, dummy=True):
     if MODBUS is True and dummy is False:
         client = ModbusTcpClient(inverter_addr)
         client.connect()
@@ -167,16 +199,18 @@ def write_to_inverter(register, values_list):
         print("Not actually writing to inverter")
     return False
 
-def sync_inverter_time():
+def sync_inverter_time(dummy=True):
     system_now = datetime.datetime.utcnow() # Keep the inverter in UTC.  The Agile prices are all in UTC
     time_list = [system_now.year-2000, system_now.month, system_now.day, system_now.hour, system_now.minute, system_now.second]
     write_to_inverter(45, time_list)
 
-def zero_charging_slots():
+def zero_charging_slots(dummy=True):
     write_to_inverter(1100, [0]*9)
     write_to_inverter(1018, [0]*9)
 
 def get_battery_soc():
+    # TODO:  Move all inverter functions to a class. This function should be a method of that class.
+    # Stop calling modbus multiple times for the same thing
     if not MODBUS:
         return False
     # Battery state of charge s held in register 1014
@@ -196,6 +230,9 @@ def get_current_charging_slots():
     charging_slots.extend(client.read_holding_registers(1018, 9, slave=1).registers) # Looks like the docs are wrong here. 1018 is the start of the charging slots not 1017 
     charge_limit = client.read_holding_registers(1091, 1, slave=1).registers[0]
     ac_charge_enabled = client.read_holding_registers(1092, 1, slave=1).registers[0]
+    results = client.read_holding_registers(45, 7, slave=1)
+    year, month, day, hour, minute, second, dow = results.registers
+    inverter_now = datetime.datetime(year, month, day, hour, minute, second)
     client.close()
 
     charge_slots_list = []
@@ -210,8 +247,9 @@ def get_current_charging_slots():
 
     print(f"Charge Limit: {charge_limit}")
     print(f"AC Charge Enabled: {ac_charge_enabled}")
+    print(f"Inverter time: {inverter_now}")
 
-def set_charging(slots):
+def set_charging(slots, dummy=True):
     print("Setting charging")
     charging_slots_list = []
     for r in slots.itertuples():
@@ -225,7 +263,7 @@ def set_charging(slots):
         print(f"Encoded start time: {encoded_start_time}")
         print(f"Encoded end time: {encoded_end_time}")
         charging_slots_list.append([encoded_start_time, encoded_end_time, 1])
-    sync_inverter_time()
+    sync_inverter_time(dummy)
     zero_charging_slots()
     a,b = [],[]
     for slot in charging_slots_list[0:3]:
@@ -253,6 +291,7 @@ def parse_args():
     mode_group.add_argument("-e", "--economy", dest="economy", help="Program the cheapest over-night charging schedule possible", action="store_true")
     mode_group.add_argument("-4", "--4hour", dest="fourhour", help="Program the cheapest 4 hour charging schedule possible", action="store_true")
     mode_group.add_argument("-2", "--2hour", dest="twohour", help="Program the cheapest 2 hour charging schedule possible", action="store_true")
+    mode_group.add_argument("-a", "--auto", dest="auto", help="Program the cheapest charging schedule possible taking in to account solar conditions and current soc", action="store_true")
 
     config_group = parser.add_argument_group("Configuration")
     config_group.add_argument("-c", "--cheap", dest="cheap", help="Set the threshold for cheap electricity in p/kWh.  Default is 15", type=float)
@@ -260,7 +299,7 @@ def parse_args():
     #config_group.add_argument("-b", "--battery", dest="battery", help="Set the battery size in kWh.  Default is 16kWh", default=16, type=int)
     config_group.add_argument("-r", "--rate", dest="rate", help="Set the maximum AC charge rate in kW.  Default is 100%%", default=100, type=int)
     config_group.add_argument("-D", "--debug", dest="debug", help="Enable debug output", action="store_true")
-    config_group.add_argument("--dummy", dest="dummy", help="Don't actually program the inverter", action="store_true")
+    config_group.add_argument("--dummy", dest="dummy", help="Dummy  run. Don't actually program the inverter", action="store_true")
     config_group.add_argument("-t", "--time", dest="time", help="Set the time on the inverter", action="store_true")
 
     info_group = parser.add_argument_group("Information")
@@ -327,29 +366,82 @@ def get_solar_production_tomorrow():
     # That might mean signing up for an account, then we can hit the API once a minute if we really want to
     headers = {"Accept": "application/json"}
     r = requests.get(url, headers=headers)
-    return r.json()['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
+    wh = r.json()['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
+    return wh / 1000
+
+def auto_charge(prices):
+    # We are going to switch the inverter in to battery first mode in order to charge the battery.
+    # We could switch *out* of battery first mode as soon as the battery is charge, but that we are charging means that
+    # the electricity is at its cheapest.  So... I propose that we don't switch out of battery first mode until the time
+    # slot is up.  i.e. consume from the grid for the entire slot.  This also allows us to run heavy loads e.g. the washing
+    # machine, dishwasher, tumble dryer, etc from the grid, and so not consuming the battery.
+    # We can limit the amount of power we draw from the grid to charge the battery by simply setting the maximum SOC.
+    # To start with there will be two possible options: 100% or 50%.  This function will try and decide which by simply
+    # looking at solar production tomorrow and seeing what's left after the house has used it's usual amount.
+    # We can also assume that we need to charge overnight. We can rule out slots which are during the day. This might not be true all the time, but
+    # will worry about that later.
+    tomorrow_solar = 21.716 # get_solar_production_tomorrow()
+    # TODO: fix ^
+    typical_usage = 14.0 # kWh
+    battery_capacity = 16.0 # kWh
+    print(f"Tomorrow's solar production is {tomorrow_solar} kWh")
+    print(f"Typical usage is {typical_usage} kWh")
+    spare_solar = tomorrow_solar - typical_usage
+    if spare_solar > battery_capacity:
+        print(f"Tomorrow's solar is more than enough to charge the battery to 100%")
+        # Need to know if we can make it to $SUNRISE_OCLOCK before the battery is empty
+        max_achievable_soc = 100
+    else:
+        print(f"Leaving {spare_solar} kWh to top up the battery")
+        print(f"Battery capacity is: {battery_capacity} kWh")
+        max_achievable_soc = spare_solar / battery_capacity * 100
+        print(f"Which means we can add max. {max_achievable_soc}% to the battery.")
+    current_soc = get_battery_soc()
+    print(f"Current battery SOC is {current_soc}%")
+    # We're going to need to know what time the earliest usable solar is (usable > 600W?) 
+    if current_soc < 50:
+        # Assume we will need a 4 hour slot to charge the battery to 100%
+        four_hour = prices.get_four_hour_windows().head(1)
+        separate_windows = prices.get_cheapest_n_slots(8)
+        separate_windows = merge_slots(separate_windows)
+        print(four_hour)
+        print(separate_windows)
+    else:
+        # Assume we will need a 2 hour slot to charge the battery
+        two_hour = prices.get_two_hour_windows().head(1)
+        separate_windows = prices.get_cheapest_n_slots(4)
+        separate_windows = merge_slots(separate_windows)
+        two_hour_cost = two_hour.value_inc_vat.mean()
+        separate_cost = separate_windows.value_inc_vat.mean()
+        print(f"Two hour cost: {two_hour_cost}")
+        print(f"Separate cost: {separate_cost}")
+
+        
+    # if current_soc < 50 and battery is nearly empty, then we should charge to 100%
+    #if spare_solar > 0:
+        print("Setting battery SOC to 100%")
+        #set_battery_soc(100)
+
 
 def main():
-    global prices
-    global start_time
-    global end_time
-    global dummy
+    #global prices
+    #global start_time
+    #global end_time
 
+    prices = None
     args = parse_args()
     print(args)
     if args.inverter:
         inverter_addr = args.inverter
     if args.zero:
         zero_charging_slots()
-    if args.dummy:
-        dummy = True
-    if args.cheap:
-        global cheap
-        cheap = args.cheap
+    # if args.cheap:
+    #     global cheap
+    #     cheap = args.cheap
     if args.schedule:
         get_current_charging_slots()
     if args.time:
-        sync_inverter_time()
+        sync_inverter_time(args.dummy)
         print("Inverter time set")
     if args.start_time:
         start_time = args.start_time
@@ -369,16 +461,20 @@ def main():
     if args.economy:
         if prices is None:
             prices = Prices()
-        set_charging(prices.get_economy_slots())
+        set_charging(prices.get_economy_slots(), args.dummy)
         # set_economy_charging(prices)
     if args.fourhour:
         if prices is None:
             prices = Prices()
-        set_charging(prices.get_four_hour_windows().head(1))
+        set_charging(prices.get_four_hour_windows().head(1), args.dummy)
     if args.twohour:
         if prices is None:
             prices = Prices()
-        set_charging(prices.get_two_hour_windows().head(1))
+        set_charging(prices.get_two_hour_windows().head(1), args.dummy)
+    if args.auto:
+        if prices is None:
+            prices = Prices()
+        auto_charge(prices)
     if args.influx:
         if prices is None:
             prices = Prices()
