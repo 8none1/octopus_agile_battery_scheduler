@@ -30,6 +30,7 @@ import sys
 import requests
 import pandas as pd
 import datetime
+import pytz
 from argparse import ArgumentParser
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -58,7 +59,7 @@ idle_batt_usage = 5 # percent battery used per hour while house is idle
 
 
 class Prices:
-    def __init__(self, start_time = datetime.datetime.now().isoformat()+"Z", end_time = None, cheap=15):
+    def __init__(self, start_time = datetime.datetime.now().isoformat()+"Z", end_time = None, cheap=15, dummy=False):
         # TODO: move the product code etc to either a config file or a command line argument, or pull it from the API
         base_url = "https://api.octopus.energy/v1/"
         product_code = "AGILE-FLEX-22-11-25"
@@ -67,7 +68,7 @@ class Prices:
         agile_price_url += "?period_from=" + start_time
         if end_time is not None:
             agile_price_url += "&period_to=" + end_time.isoformat() + "Z"
-        #print("URL: " + agile_price_url)
+        print("URL: " + agile_price_url)
         r = requests.get(agile_price_url)
         self.prices_dict = r.json()
         self.two_hour_windows = None
@@ -75,6 +76,7 @@ class Prices:
         self.cheapest_30min_slots = None
         self.economy_slots = None
         self.cheap = cheap
+        self.dummy = dummy
         self.build_dataframe()
     
     def build_dataframe(self):
@@ -161,7 +163,7 @@ class Prices:
         economy_slots.reset_index(drop=True, inplace=True)
         economy_slots['grp_time'] = economy_slots.end_time.diff().dt.seconds.gt(1800).cumsum()
         economy_slots = economy_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
-        print(f"Economy slots: {economy_slots}")
+        #print(f"Economy slots: {economy_slots}")
         economy_slots.reset_index(drop=True, inplace=True)
         economy_slots['grp_time'] = economy_slots.end_time.diff().dt.seconds.gt(3600).cumsum()
         economy_slots = economy_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
@@ -169,7 +171,8 @@ class Prices:
         self.economy_slots = economy_slots
         return economy_slots
     
-    def write_to_influxdb(self):
+    def write_to_influxdb(self, dummy=False):
+        if dummy: return False
         # You need the index to be a time column otherwise InfluxDB will not accept it. (e.g. index "0" = epoch zero = 1970-01-01 00:00:00 = a long time ago = outside the RP of the bucket)
         influx_df = self.prices.set_index('start_time')
         with InfluxDBClient(url=api_key.influxdb_url, token=api_key.influxdb_token, org=api_key.influxdb_org) as client:
@@ -202,11 +205,11 @@ def write_to_inverter(register, values_list, dummy=True):
 def sync_inverter_time(dummy=True):
     system_now = datetime.datetime.utcnow() # Keep the inverter in UTC.  The Agile prices are all in UTC
     time_list = [system_now.year-2000, system_now.month, system_now.day, system_now.hour, system_now.minute, system_now.second]
-    write_to_inverter(45, time_list)
+    write_to_inverter(45, time_list, dummy=dummy)
 
 def zero_charging_slots(dummy=True):
-    write_to_inverter(1100, [0]*9)
-    write_to_inverter(1018, [0]*9)
+    write_to_inverter(1100, [0]*9, dummy)
+    write_to_inverter(1018, [0]*9, dummy)
 
 def get_battery_soc():
     # TODO:  Move all inverter functions to a class. This function should be a method of that class.
@@ -264,7 +267,7 @@ def set_charging(slots, dummy=True):
         print(f"Encoded end time: {encoded_end_time}")
         charging_slots_list.append([encoded_start_time, encoded_end_time, 1])
     sync_inverter_time(dummy)
-    zero_charging_slots()
+    zero_charging_slots(dummy)
     a,b = [],[]
     for slot in charging_slots_list[0:3]:
         a.extend(slot)
@@ -272,12 +275,18 @@ def set_charging(slots, dummy=True):
         b.extend(slot)
     print(a)
     print(b)
-    write_to_inverter(1100, a)
-    write_to_inverter(1018, b)
+    write_to_inverter(1100, a, dummy)
+    write_to_inverter(1018, b, dummy)
 
 def set_max_soc(soc):
     print(f"Setting max SOC to {soc}%")
     write_to_inverter(1091, [soc])
+
+def convert_to_local_timezone(slots):
+    local_tz = pytz.timezone("Europe/London")
+    slots["start_time"] = slots["start_time"].dt.tz_convert(local_tz)
+    slots["end_time"]   = slots["end_time"].dt.tz_convert(local_tz)
+    return slots
 
 def parse_args():
     parser = ArgumentParser(description="Control Growatt SPH inverters and batteries to charge the battery at the cheapest time possible using Agile Octopus.")
@@ -369,7 +378,7 @@ def get_solar_production_tomorrow():
     wh = r.json()['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
     return wh / 1000
 
-def auto_charge(prices):
+def auto_charge(prices, dummy):
     # We are going to switch the inverter in to battery first mode in order to charge the battery.
     # We could switch *out* of battery first mode as soon as the battery is charge, but that we are charging means that
     # the electricity is at its cheapest.  So... I propose that we don't switch out of battery first mode until the time
@@ -384,6 +393,7 @@ def auto_charge(prices):
     # TODO: fix ^
     typical_usage = 14.0 # kWh
     battery_capacity = 16.0 # kWh
+    # We need 25% of the battery to get through the night. 00:00 to 08:00
     print(f"Tomorrow's solar production is {tomorrow_solar} kWh")
     print(f"Typical usage is {typical_usage} kWh")
     spare_solar = tomorrow_solar - typical_usage
@@ -399,7 +409,19 @@ def auto_charge(prices):
     current_soc = get_battery_soc()
     print(f"Current battery SOC is {current_soc}%")
     # We're going to need to know what time the earliest usable solar is (usable > 600W?) 
-    if current_soc < 50:
+    #TODO: deal with import being cheaper than export.  i.e. charge the battery to 100% regardless, and keep in batt first mode for the duration of the slots.
+    if max_achievable_soc > 90:
+        # We can pretty much charge the battery to 100% tomorrow
+        # so we only need enough battery to get to sunrise-ish
+        # how many minutes from now until 8am?
+        now = datetime.datetime.utcnow().replace(tzinfo=pytz.utc)
+        if now.hour <= 23:
+            tomorrow_8am = datetime.datetime(now.year, now.month, now.day+1, 8, 0, 0, 0, tzinfo=pytz.utc)
+        else:
+            tomorrow_8am = datetime.datetime(now.year, now.month, now.day, 8, 0, 0, 0, tzinfo=pytz.utc)
+        hours_to_useable_solar = (tomorrow_8am - now).total_seconds() / 3600
+        print(hours_to_useable_solar)
+    if current_soc < 50 and max_achievable_soc < 50:
         # Assume we will need a 4 hour slot to charge the battery to 100%
         four_hour = prices.get_four_hour_windows().head(1)
         separate_windows = prices.get_cheapest_n_slots(8)
@@ -434,7 +456,7 @@ def main():
     if args.inverter:
         inverter_addr = args.inverter
     if args.zero:
-        zero_charging_slots()
+        zero_charging_slots(args.dummy)
     # if args.cheap:
     #     global cheap
     #     cheap = args.cheap
@@ -474,24 +496,25 @@ def main():
     if args.auto:
         if prices is None:
             prices = Prices()
-        auto_charge(prices)
+        auto_charge(prices, args.dummy)
     if args.influx:
         if prices is None:
             prices = Prices()
-        prices.write_to_influxdb()
+        prices.write_to_influxdb(args.dummy)
     if args.prices:
         if prices is None:
             prices = Prices()
+        print("All prices in LOCAL time:")
         print(prices.prices.to_markdown())
-        print("\nCheapest combined TWO HOUR slots:")
-        print(prices.get_two_hour_windows().to_markdown())
-        print("\nCheapest combined FOUR HOUR slots:")
-        print(prices.get_four_hour_windows().to_markdown())
-        print("\nCheapest ECONOMY slots:")
+        print("\nCheapest combined TWO HOUR slots in LOCAL time:")
+        print(convert_to_local_timezone(prices.get_two_hour_windows()).to_markdown())
+        print("\nCheapest combined FOUR HOUR slots in LOCAL time:")
+        print(convert_to_local_timezone(prices.get_four_hour_windows()).to_markdown())
+        print("\nCheapest ECONOMY slots in LOCAL time:")
         if prices.get_economy_slots().empty:
             print("No economy slots found.  Use the four hour slot instead")
         else:
-            print(prices.get_economy_slots().to_markdown())
+            print(convert_to_local_timezone(prices.get_economy_slots()).to_markdown())
     sys.exit()
 
 
