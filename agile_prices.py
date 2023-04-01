@@ -503,7 +503,7 @@ def auto_charge(prices, dummy):
         print(f"Final auto slots are:\n{slots}")
         slots = merge_slots(slots)
         print(f"Final auto slots after merge:\n{slots}")
-        
+
             #print(f"New slots:\n{slots}")
 
 
@@ -515,38 +515,8 @@ def auto_charge(prices, dummy):
     
 
 
-    # else:
-    #     # We can't fully charge the battery tomorrow
-    #     # So let's charge to 100 now 
-    #     # Todays use case:
-    #     # - Not enough solar tomorrow to do anything
-    #     # - Battery needs to be at 100% before 7am (or it could be less and then charge over lunch?  Gives flexibility in case it gets sunny)
-    #     # - I have enough battery to last the night, so I can choose to charge whenever
-    #     # - Might as well make the charge as late as possible?
-    #     # - 
-
-    #     # This should be how much we need to add to the battery now to get to 100% during the day tomorrow
-    #     max_charge_limit = 100 - max_additional_charge
-    #     print(f"Max charge limit: {max_charge_limit}")
-    #     set_max_soc(max_charge_limit) # Limit the charge to this amount.  This won't stop the inverter from pulling from the grid, but it will limit the amount of power we consume for charging
-    #     battery_percent_charge_per_hour = (max_ac_charge_rate / battery_capacity) * 100 # 2.7kW / 13.5kWh = 20% per hour
-    #     print(f"battery_percent_charge_per_hour: {battery_percent_charge_per_hour}")
-    #     hours_needed_to_get_to_required_charge = ((max_charge_limit - current_soc) / battery_percent_charge_per_hour)
-    #     print(f"Hours needed to get to required charge: {hours_needed_to_get_to_required_charge}")
-    #     # Round up to the nearest hour
-    #     hours_needed_to_get_to_required_charge = math.ceil(hours_needed_to_get_to_required_charge)
-    #     print(f"Hours needed to get to required charge (rounded up): {hours_needed_to_get_to_required_charge}")
-    #     # How long can we last on the current charge?
-    #     hours_remaining = (100 - current_soc) / 5 # TODO This assumes we are running the script at "night"
-    #     print(f"Hours remaining: {hours_remaining}")
-    #     # Need to work out if we can add some charge to the battery now and then do the bulk charge later
-    #     # that will be tedious to work out.
-
-    #     # if hours_remaining > hours_to_useable_solar:
-    #     #     print("We can charge at any time")
-
-    #     # else:
-    # #     #     print(f"We need to charge within {hours_remaining} hours")
+   
+ 
         
     #     start_time = datetime.datetime.utcnow().strftime("%H:%M")
     #     slots = prices.get_economy_slots(max_slots=(hours_needed_to_get_to_required_charge*2),end_time=datetime.datetime(now.year, now.month, now.day+1, 8, 0, 0, 0, tzinfo=pytz.utc))
