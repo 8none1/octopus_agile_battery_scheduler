@@ -178,4 +178,4 @@ Running the `agile_prices.py` script will print out the cheapest charging period
 I wonder if doing multiple 30 minute charges during the day is "worse" for the batteries than doing one continuous charging period of a few hours.  Hence the two and four hour slots.
 If you have any facts on this topic, please share (e.g. via a Github issue).
 My solar expert tells me that it'll probably be fine.
-
+Update: It turns out that the cheapest slots during the night often run consecutively, so in practice choosing the cheapest 30 min slots usually works out to be a contiguous 3 hour block.

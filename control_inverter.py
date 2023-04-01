@@ -91,7 +91,12 @@ for e in results:
     else:
         print(e)
 
-
+# Battery Info?
+results = client.read_input_registers(1082, 43, slave=1).registers
+a = 1082
+for e in results:
+    print(f"Register: {a} : {e:04x} | {e}")
+    a += 1
 
 client.close()
 
