@@ -152,6 +152,18 @@ Cheapest ECONOMY slots in LOCAL time:
 
 ## Current state
 
+### 2023-04-01
+
+Added: pull battery count from the inverter.  We assume that each battery is a 6.5kWh battery.  You can override this by passing a `-b <value>` argument.
+
+`auto` mode is now nearly ready for use.  It will try to charge the battery to the correct level for the next day.  If there is enough solar to charge the battery to full tomorrow and service the normal house requirements then the battery will not be charged.  If it runs out over night then you're going to be importing from the grid until the sun comes up.  It will try to schedule a charge if it thinks that the battery won't last the night, but will try to only charge the battery enough to get you to the next morning.  This currently involves a lot of hard-coded guesses and probably won't work very well.  It needs some work still.
+
+If there isn't enough solar tomorrow to fully charge the battery it will try to boost the battery to the required level during the night, i.e. minimise the imported power and use as much solar as possible. It will also try to take in to account how much battery will be lost between the end of the charge and the solar kicking in and stay on grid power a bit longer.
+
+The way it does this is by setting a maximum state of charge (SOC) of the battery but keeping in "Battery First" mode longer.  Battery First mode means that the house will pull from the grid regardless of if the battery is at the required SOC or not and therefore not use any battery power.
+
+If the electricity price is higher than 110% of the minimum 30 minute price then it won't do this, it will stop charging and switch back to load first mode draining the battery to power the house rather than buying the more expensive power.  This can be tweaked in the code, it's not a cli argument yet.
+
 ### 2023-03-23
 
 Added the ability to export prices to InfluxDB.  Fixed a few bugs in the economy scheduler.  Started to really get to grips with what this thing needs to do.
