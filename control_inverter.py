@@ -92,11 +92,50 @@ for e in results:
         print(e)
 
 # Battery Info?
+print("\n\nBattery Info")
 results = client.read_input_registers(1082, 43, slave=1).registers
 a = 1082
 for e in results:
     print(f"Register: {a} : {e:04x} | {e}")
     a += 1
+
+# Energy used today?
+# 1052 = battery discharge today
+# 1056 = battery charge today
+# 1060 = load consumption today
+print("\n\nEnergy used today")
+results = client.read_input_registers(1044, 20, slave=1).registers
+a = 1044
+print(results)
+for e in range(0, len(results), 2):
+    b = results[e] << 16 | results[e+1]
+    print(f"Register: {a} : {b/10}")
+    #print(a*1000)
+    a += 2
+
+results = client.read_input_registers(1056, 2, slave=1).registers
+a = 1056
+print(results)
+for e in range(0, len(results), 2):
+    b = results[e] << 16 | results[e+1]
+    print(f"Register: {a} : {b/10}")
+    #print(a*1000)
+    a += 2
+
+
+
+
+print("\n\nEnergy used today")
+results = client.read_input_registers(100, 20, slave=1).registers
+a = 100
+print(results)
+for e in range(0, len(results), 2):
+    b = results[e] << 16 | results[e+1]
+    print(f"Register: {a} : {b/10}")
+    #print(a*1000)
+    a += 2
+
+
 
 client.close()
 

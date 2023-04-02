@@ -191,3 +191,7 @@ I wonder if doing multiple 30 minute charges during the day is "worse" for the b
 If you have any facts on this topic, please share (e.g. via a Github issue).
 My solar expert tells me that it'll probably be fine.
 Update: It turns out that the cheapest slots during the night often run consecutively, so in practice choosing the cheapest 30 min slots usually works out to be a contiguous 3 hour block.
+
+
+If you need a modbus device to talk to your inverter, checkout the EW11 devices I describe in this repo:  https://github.com/8none1/growatt_sph_nodered
+They've been very reliable for me.
