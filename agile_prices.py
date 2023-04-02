@@ -60,7 +60,7 @@ gas_price = 10.31 # p/kWh TODO: Look this up from the API
 
 
 class Prices:
-    def __init__(self, start_time = datetime.datetime.now().isoformat()+"Z", end_time = None, cheap=15, dummy=False):
+    def __init__(self, start_time = datetime.datetime.utcnow().isoformat(timespec='seconds')+"Z", end_time = None, cheap=15, dummy=False):
         # TODO: move the product code etc to either a config file or a command line argument, or pull it from the API
         base_url = "https://api.octopus.energy/v1/"
         product_code = "AGILE-FLEX-22-11-25"
@@ -72,19 +72,21 @@ class Prices:
         print("URL: " + agile_price_url)
         r = requests.get(agile_price_url)
         self.prices_dict = r.json()
-        self.two_hour_windows = None
-        self.four_hour_windows = None
-        self.cheapest_30min_slots = None
-        self.economy_slots = None
+        #self.two_hour_windows = None
+        #self.four_hour_windows = None
+        #self.cheapest_30min_slots = None
+        #self.economy_slots = None
         self.cheap = cheap
         self.dummy = dummy
         self.build_dataframe()
     
     def build_dataframe(self):
+        # TODO: Consider rounding prices to an integer number of pence. It should make contiguous blocks easier to find and cost basically nothing extra.
         start_time    = pd.DatetimeIndex(x['valid_from'] for x in self.prices_dict['results'])
         end_time      = pd.DatetimeIndex(x['valid_to'] for x in self.prices_dict['results'])
         value_inc_vat = [x['value_inc_vat'] for x in self.prices_dict['results']]
         self.prices = pd.DataFrame({'start_time':start_time, 'end_time': end_time, 'value_inc_vat': value_inc_vat})
+        self.prices['duration'] = self.prices.end_time - self.prices.start_time
         self.prices.sort_values(by="start_time", inplace=True)
         self.min_price = self.prices[self.prices.value_inc_vat == self.prices.value_inc_vat.min()] # Keep it as a frame to keep the start and end times
         self.max_price = self.prices[self.prices.value_inc_vat == self.prices.value_inc_vat.max()]
@@ -94,11 +96,11 @@ class Prices:
         print(f"Max price: {self.max_price.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.max_price.head(1).start_time.values[0]} to {self.max_price.head(1).end_time.values[0]}")
         print(f"Avg price: {self.avg_price:.2f}p/kWh")
         print("\n")
-        self.get_two_hour_windows()
-        self.get_four_hour_windows()
-        self.get_cheapest_30min_slots()
-        print(f"Cheapest 2 hour window: {self.two_hour_windows.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.two_hour_windows.head(1).start_time.values[0]} to {self.two_hour_windows.head(1).end_time.values[0]}")
-        print(f"Cheapest 4 hour window: {self.four_hour_windows.head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.four_hour_windows.head(1).start_time.values[0]} to {self.four_hour_windows.head(1).end_time.values[0]}")
+        #self.get_two_hour_windows()
+        #self.get_four_hour_windows()
+        #self.get_cheapest_30min_slots()
+        print(f"Cheapest 2 hour window: {self.get_two_hour_windows().head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.get_two_hour_windows().head(1).start_time.values[0]} to {self.get_two_hour_windows().head(1).end_time.values[0]}")
+        print(f"Cheapest 4 hour window: {self.get_four_hour_windows().head(1).value_inc_vat.values[0]:.2f}p/kWh \t{self.get_four_hour_windows().head(1).start_time.values[0]} to {self.get_four_hour_windows().head(1).end_time.values[0]}")
         print("\n")
 
     def get_min_price(self):
@@ -110,21 +112,17 @@ class Prices:
     
     def get_two_hour_windows(self):
         # This finds a contiguous 2 hour window that is the cheapest.
-        if self.two_hour_windows is not None:
-            return self.two_hour_windows
         two_hour_windows = self.prices.rolling('2h', min_periods=4, on='start_time').mean()
         two_hour_windows.dropna(inplace=True)
         two_hour_windows.sort_values(by='value_inc_vat', inplace=True)
         two_hour_windows.drop(two_hour_windows[two_hour_windows.value_inc_vat > self.avg_price].index, inplace=True)
         two_hour_windows = remove_overlap(two_hour_windows, pd.Timedelta('1h30m'))
         two_hour_windows = add_window_bounds(two_hour_windows, pd.Timedelta('1h30m'))
-        self.two_hour_windows = two_hour_windows
-        return self.two_hour_windows
+        #self.two_hour_windows = two_hour_windows
+        return two_hour_windows
     
     def get_four_hour_windows(self):
         # This finds a contiguous 4 hour window that is the cheapest.
-        if self.four_hour_windows is not None:
-            return self.four_hour_windows
         four_hour_windows = self.prices.rolling('4h', min_periods=8, on='start_time').mean()
         four_hour_windows.dropna(inplace=True)
         four_hour_windows.sort_values(by='value_inc_vat', inplace=True)
@@ -135,33 +133,42 @@ class Prices:
         # If the average 4 hour unit price is lower than "cheap" then reset cheap to be the average 4 hour unit price.
         #if four_hour_windows.value_inc_vat.mean() < self.cheap:
         self.cheap = four_hour_windows.value_inc_vat.mean()
-        return self.four_hour_windows
+        return four_hour_windows
     
     def get_cheapest_30min_slots(self):
         # This finds 30 min slots that are cheaper than the average 4 hour unit price.
-        if self.cheapest_30min_slots is not None:
-            return self.cheapest_30min_slots
         cheapest_30min_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > self.cheap].index)
         # This self-adjusting cheap price is a bit risky I think. e.g. what if we have two negative slots in a row, it could throw the average. 
         #  We'll have to see how it goes.  See the four hour window section for how it's calculated.
-        self.cheapest_30min_slots = cheapest_30min_slots
-        return self.cheapest_30min_slots
+        #self.cheapest_30min_slots = cheapest_30min_slots
+        return cheapest_30min_slots
     
-    def get_cheapest_n_slots(self, num_slots):
-        # This finds the cheapest 2 hour spread of slots.
-        slots = self.cheapest_30min_slots
+    def get_cheapest_n_slots(self, num_slots, start_time=None, end_time=None):
+        # TODO: This is badly named.  It's not the "cheapest" it's actually slots which are lower price than the average 4 hour price
+        # TODO: it also ignores the start and end time.  Perhaps that's ok. 
+        slots = self.get_cheapest_30min_slots()
         slots.sort_values(by="value_inc_vat", inplace=True)
         slots = slots.head(num_slots)
         slots = slots.reset_index(drop=True)
+        return slots
+    
+    def get_all_slots_between(self, start_time, end_time):
+        # This returns all slots between two times.
+        slots = self.prices[self.prices.start_time >= start_time]
+        slots = slots[slots.end_time <= end_time]
+        # print(f"In get_all_slots_between, start_time: {start_time}, end_time: {end_time}")
+        # print(f"Slots: {slots}")
         return slots
     
     def get_economy_slots(self, start_time=datetime.datetime.utcnow().replace(tzinfo=pytz.utc), end_time=None, max_slots=48):
         # The goal of this function is to return a dataframe of the cheapest slots between 19:00 and 07:00
         # i.e. how can we charge the battery before tomorrow morning?
         max_slots = int(max_slots)
+        print(f"Max slots: {max_slots}")
         print(f"Start time: {start_time}")
         if end_time is None:
             end_time = start_time + datetime.timedelta(days=1)
+        end_time = end_time - datetime.timedelta(minutes=30) # So we don't overrun the end time.
         print(f"End time: {end_time}")
         cheap_30min_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > self.cheap].index)
         self.cheap_30min_slots = cheap_30min_slots
@@ -183,13 +190,23 @@ class Prices:
         #economy_slots['grp_time'] = economy_slots.end_time.diff().dt.seconds.gt(3600).cumsum()
         #economy_slots = economy_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
         #economy_slots.reset_index(drop=True, inplace=True)
-        self.economy_slots = economy_slots
+        #self.economy_slots = economy_slots
         return economy_slots
+
+    def get_super_cheap_slots(self):
+        # The purpose of this function is to find those times where electricity is really cheap.
+        # Specifically, cheaper than gas.  We will then use this to switch the inverter to batt first mode
+        # charging the battery from the grid and switching the house to consume from the grid during this time as well.
+        # Then you can heat your hot water etc from electricity.  Perhaps even getting paid to do so.
+        super_cheap = 10.31 # TODO: Pull this from the API instead of hard coding it.
+        super_cheap_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > super_cheap].index)
+        return super_cheap_slots
     
     def write_to_influxdb(self, dummy=False):
         if dummy: return False
         # You need the index to be a time column otherwise InfluxDB will not accept it. (e.g. index "0" = epoch zero = 1970-01-01 00:00:00 = a long time ago = outside the RP of the bucket)
         influx_df = self.prices.set_index('start_time')
+        influx_df.drop(columns=['duration'], inplace=True)
         with InfluxDBClient(url=api_key.influxdb_url, token=api_key.influxdb_token, org=api_key.influxdb_org) as client:
             write_api = client.write_api(write_options=SYNCHRONOUS)
             write_api.write(bucket=api_key.influxdb_bucket, record=influx_df, data_frame_measurement_name='agile_prices')
@@ -198,12 +215,15 @@ class Prices:
 def merge_slots(slots):
     # This merges slots that are contiguous. It means that we use fewer programming slots on the inverter.
     # Each slot must be the same duration.
-    duration = slots.head(1).end_time - slots.head(1).start_time
+    # TODO: use the duration col instead of working it out?
+    #slots.drop(columns=['duration'], inplace=True)
     slots.sort_values(by="start_time", inplace=True)
     slots.reset_index(drop=True, inplace=True)
-    slots['grp_time'] = slots.end_time.diff().dt.seconds.gt(duration.dt.seconds[0]).cumsum()    
-    slots = slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean'})
+    slot_duration = slots.head(1)['duration']
+    slots['grp_time'] = slots.end_time.diff().dt.seconds.gt(slot_duration.dt.seconds[0]).cumsum()
+    slots = slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'value_inc_vat': 'mean', 'duration': 'sum'})
     slots = slots.reset_index(drop=True)
+    print(f"Merged slots:\n {slots}")
     return slots
 
 def write_to_inverter(register, values_list, dummy=True):
@@ -228,7 +248,7 @@ def zero_charging_slots(dummy=True):
 
 def get_battery_size():
     # I don't know if this works.  It seems to align with my set up, but I don't know if it's correct.
-    print("Reading battery count")
+    #print("Reading battery count")
     if not MODBUS:
         return False
     client = ModbusTcpClient(inverter_addr)
@@ -304,9 +324,26 @@ def set_charging(slots, dummy=True):
     write_to_inverter(1100, a, dummy)
     write_to_inverter(1018, b, dummy)
 
-def set_max_soc(soc):
+def set_max_soc(soc, dummy):
+    if soc < 1 or soc > 100:
+        print(f"Invalid SOC: {soc}")
+        return False
     print(f"Setting max SOC to {soc}%")
-    write_to_inverter(1091, [soc])
+    write_to_inverter(1091, [soc], dummy)
+
+def get_local_load_today():
+    if not MODBUS:
+        return False
+    client = ModbusTcpClient(inverter_addr)
+    client.connect()
+    results = client.read_input_registers(1060, 2, slave=1).registers
+    #batt_charge = client.read_input_registers(1056, 2, slave=1).registers
+    client.close()
+    inv1 = results[0] << 16 | results[1]
+    # int is close enough precision for my purposes
+    print(f"Local load today: {int(inv1/10)}")
+    return int(inv1/10)
+
 
 def convert_to_local_timezone(slots):
     local_tz = pytz.timezone("Europe/London")
@@ -403,6 +440,174 @@ def get_solar_production_tomorrow(dummy=True):
     wh = r.json()['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
     return wh / 1000
 
+
+def get_soc_required_tomorrow(dummy=True):
+    # How much power in kwh do we need tomorrow?
+    # Look at current usage over today to get an indication of average usage
+    daily_kwh_required = get_local_load_today()
+    print(f"Daily kWh required: {daily_kwh_required}")
+    # How much of that is solar?
+    solar_production_tomorrow = get_solar_production_tomorrow()
+    print(f"kWh from solar tomorrow: {solar_production_tomorrow}")
+    # How much battery do we need to fill in?
+    power_shortfall = daily_kwh_required - solar_production_tomorrow
+    print(f"Power shortfall: {power_shortfall}")
+    if power_shortfall < 0:
+        print("We have enough solar for tomorrow")
+        batt_percent_soc_needed_for_tomorrow = 0
+    else:
+        print("We need to use the battery tomorrow")
+        power_shortfall = abs(power_shortfall)
+        batt_size = get_battery_size()
+        print(f"Battery size: {batt_size}")
+        batt_percent_soc_needed_for_tomorrow = ((power_shortfall * 1.1 / batt_size) * 100) + 10 # 10% deadzone and 10% buffer.  This will need tweaking
+    print(f"Battery SOC needed for tomorrow: {batt_percent_soc_needed_for_tomorrow}")
+    return math.ceil(batt_percent_soc_needed_for_tomorrow)
+
+
+
+def new_auto_charge(prices, dummy):
+    # This will work better if it is run later in the day.  Running it in the morning will
+    # produce strange results.
+
+    final_slots = pd.DataFrame()
+
+    batt_percent_soc_needed_for_tomorrow = get_soc_required_tomorrow()
+    set_max_soc(batt_percent_soc_needed_for_tomorrow, dummy)
+    batt_size = get_battery_size()
+    print(f"Battery size: {batt_size}")
+    
+    # How long until the current battery charge is depleted? Therefore what time to we need to start charging by?
+    
+    avg_kw_per_hour = get_local_load_today() / datetime.datetime.utcnow().hour
+    print(f"Current average kW per hour usage: {avg_kw_per_hour}")
+    batt_soc = get_battery_soc() - 10# - 10 # 10% unusable 10% buffer
+    print(f"Battery SOC: {batt_soc}")
+    battery_kwh_remaining = batt_size * (batt_soc / 100)
+    print(f"Current battery kWh remaining: {battery_kwh_remaining}")
+    battery_runtime = battery_kwh_remaining / avg_kw_per_hour
+    print(f"Current battery runtime: {battery_runtime} hours")
+    must_charge_before = (datetime.datetime.utcnow().replace(tzinfo=pytz.utc) + datetime.timedelta(hours=battery_runtime))- datetime.timedelta(hours=1)
+
+    # What will the battery SOC be at that time?
+    # future_battery_soc = (battery_runtime * avg_kw_per_hour) / batt_size * 100
+    # assume that the battery will be flat at this time, therefore at 10% charge
+    #print(f"Future battery SOC: {future_battery_soc}")
+    # Therefore how much power and therefore time do we need to charge the battery to the required SOC?
+    # percentage_add_to_battery = batt_percent_soc_needed_for_tomorrow - future_battery_soc
+    # print(f"Percentage to add to battery: {percentage_add_to_battery}")
+    # Forget all this for now, it's unnecessary.  We should calculate the charge time based 0 -> required SOC.  Then we will already have a bit of lee-way
+    ##power_to_add_to_battery = (batt_percent_soc_needed_for_tomorrow / 100) * batt_size
+    power_to_add_to_battery = (batt_size / 100) *  batt_percent_soc_needed_for_tomorrow
+    print(f"Need to add: {power_to_add_to_battery} kW/h to the battery")
+    time_to_add_to_battery = round(power_to_add_to_battery / 2.7 * 2) / 2 # max ac charge rate is 2.7 kW/h
+    print(f"Time needed to add that: {time_to_add_to_battery}")
+
+    # Look up super-cheap slots now, maybe that's enough to get us to the required SOC
+    super_cheap_slots = prices.get_super_cheap_slots()
+    print(f"Super cheap slots:\n{super_cheap_slots}")
+    
+    if not super_cheap_slots.empty:
+        super_cheap_duration = super_cheap_slots.duration.sum().seconds / 3600
+        print(f"Super cheap duration: {super_cheap_duration}")
+        #TODO: Call out to other services to let them know that there is super-cheap power available
+        print("There is *SUPER CHEAP* power available")
+        final_slots = pd.concat([super_cheap_slots, final_slots])
+        if super_cheap_duration >= time_to_add_to_battery:
+            print("We can charge the battery on the super cheap electricity")
+            # But can we do it in time?
+            if super_cheap_slots.head(1).start_time < must_charge_before:
+                print("We can charge the battery for free in time!  Overriding max SOC setting to 100%")
+                set_max_soc(100, dummy)
+            else:
+                print("We can't charge the battery on super cheap in time.")
+                # TODO: find how much extra we need to add to get there, then find a slot to provide it
+        else:
+            print("We can't charge the battery on super cheap electricity alone")
+            # TODO: Deal with this
+    else:
+        print("There is no super-cheap power available")
+        now = datetime.datetime.utcnow().replace(tzinfo=pytz.utc)
+        print(f"Now is {now}")
+        if now.hour <= 23:
+            tomorrow_8am = now + datetime.timedelta(days=1) # TODO: Use solar forecast to work out when we can start generating instead of "8am"
+            # What happens if we're in batt first mode and there is solar being produced.  Do we still pull from the grid to service the load?
+        else:
+            tomorrow_8am = now
+        tomorrow_8am = tomorrow_8am.replace(hour=8, minute=0, second=0, microsecond=0)
+        if must_charge_before > tomorrow_8am:
+            print("We don't need to charge the battery.  There is enough charge to get us to solar generation time.")
+            return
+        else:
+            # We do need to charge the battery.  There is no super cheap power available.
+            print(f"Must start before time:\t{must_charge_before}")
+            print(f"Stop charge time:\t{tomorrow_8am}")
+            print(f"Time to add to battery:\t{time_to_add_to_battery}")
+            main_batt_charge_slots = prices.get_economy_slots(start_time=must_charge_before, end_time=tomorrow_8am, max_slots=time_to_add_to_battery*2)
+            # TODO: What if max_slots is zero? Do we get back an empty dataframe anyway? If not, we need to make get_economy_slots do that.
+            print(f"Slots:\n{main_batt_charge_slots}")
+            if main_batt_charge_slots.empty:
+                print("Error: No cheap slots available to charge the battery between now and when the battery runs out.")
+                # It's likely that the over night price is higher than the day time price tomorrow.  This seems unusual, but it does happen.
+                # kinda feels like us solar owners are getting played.
+                # Getting here does mean that there is cheaper electricity available, but it's not available when we need it.
+                # So we should charge only as much as we need to in the cheapest electricity available, and then wait until tomorrow to charge the rest.
+                time_between_flat_battery_and_solar_generation = (tomorrow_8am - must_charge_before).total_seconds() / 3600
+                print(f"Hours between flat battery and solar generation: {time_between_flat_battery_and_solar_generation}")
+                kwh_needed_to_fill_gap = time_between_flat_battery_and_solar_generation * avg_kw_per_hour
+                print(f"Kwh needed to fill gap: {kwh_needed_to_fill_gap}")
+                gap_fill_battery_percent = (kwh_needed_to_fill_gap / batt_size * 100) + 10
+                print(f"Gap fill battery percent: {gap_fill_battery_percent}")
+                time_needed_to_fill_gap = round(kwh_needed_to_fill_gap / 2.7 * 2) / 2
+                print(f"Time needed to fill gap: {time_needed_to_fill_gap}")
+                gap_fill_slots = prices.get_all_slots_between(start_time=must_charge_before, end_time=tomorrow_8am)
+                avg_of_all_gap_fill_slots = gap_fill_slots.value_inc_vat.mean()
+                # print(f"Gap fill slots:\n{gap_fill_slots}")
+                gap_fill_slots.sort_values(by='value_inc_vat', inplace=True)
+                gap_fill_slots = gap_fill_slots.head(int(time_needed_to_fill_gap*2))
+                #print(f"Gap fill slots after sort:\n{gap_fill_slots}")
+                avg_gap_fill_price = gap_fill_slots.value_inc_vat.mean()
+                print(f"Average gap fill price: {avg_gap_fill_price}")
+                print(f"Average gap fill price + 10%: {avg_gap_fill_price*1.1}")
+                print(f"Average of all gap fill slots: {avg_of_all_gap_fill_slots}")
+                if avg_of_all_gap_fill_slots <= (avg_gap_fill_price * 1.1):
+                    print("The average of all the slots is less than the average of the slots we are using to fill the gap.")
+                    print("We should wait until tomorrow to charge the battery from the cheaper slots during the day.")
+                    return
+
+                final_slots = pd.concat([gap_fill_slots, final_slots])
+                # TODO: if the average price of these slots is close to the average cost for the entire period,
+                # the probably not worth charging al all and save some cycles on the battery.
+            else:
+                # If we get here then: there is no super-cheap, so we are looking for the next cheapest, and we have found some slots
+                # Check that we were able to get enough slots to charge the battery
+                print("There are cheap slots to charge the battery")
+                duration = main_batt_charge_slots.duration.sum().seconds/3600
+                print(f"Duration: {duration}")
+                if duration < time_to_add_to_battery:
+                    print("Error: Not enough slots to charge the battery")
+                    num_needed_extra_slots = round((time_to_add_to_battery - duration) * 2) / 2
+                    print(f"Need {num_needed_extra_slots} extra hours")
+                    extra_slots = prices.get_all_slots_between(start_time=must_charge_before, end_time=tomorrow_8am)
+                    print(f"Extra slots:\n{extra_slots}")
+                    extra_slots = extra_slots.merge(main_batt_charge_slots, how='outer', indicator=True)
+                    extra_slots = extra_slots.drop_duplicates(subset=['start_time'], keep=False)
+                    print(f"Extra slots after merge and dedupe:\n{extra_slots}")
+                    extra_slots = extra_slots.sort_values(by='value_inc_vat', inplace=True)
+                    extra_slots = extra_slots.head(int(num_needed_extra_slots))
+                    final_slots = pd.concat([extra_slots, final_slots])
+                else:
+                    # If we get here then there were no super-cheap slots but we have enough normal-cheap slots to charge the battery
+                    final_slots = pd.concat([main_batt_charge_slots, final_slots])
+
+    # We should have a final_slot list
+    final_slots = merge_slots(final_slots)
+    print(f"Final slots after merge:\n{final_slots}")
+    
+    set_charging(final_slots, dummy)
+
+
+
 def auto_charge(prices, dummy):
     global battery_size
     # We are going to switch the inverter in to battery first mode in order to charge the battery.
@@ -411,105 +616,155 @@ def auto_charge(prices, dummy):
     # slot is up.  i.e. consume from the grid for the entire slot.  This also allows us to run heavy loads e.g. the washing
     # machine, dishwasher, tumble dryer, etc from the grid, and so not consuming the battery.
     # We can limit the amount of power we draw from the grid to charge the battery by simply setting the maximum SOC.
-    # To start with there will be two possible options: 100% or 50%.  This function will try and decide which by simply
-    # looking at solar production tomorrow and seeing what's left after the house has used it's usual amount.
+    
+    
     # We can also assume that we need to charge overnight. We can rule out slots which are during the day. This might not be true all the time, but
     # will worry about that later.
     # TODO:  Work out how long after sunrise we can start generating 600W+  For now hard code to 8am
-    # TODO: deal with import being cheaper than export.  i.e. charge the battery to 100% regardless, and keep in batt first mode for the duration of the slots.
+    # TODO:  Look at real consumption data to get a better idea of typical usage.  I think we can pull this directly from the inverter. Edit: yes, you can. see `control_inverter.py` for an example.
+    # TODO:  Deal with import being cheaper than export.  i.e. charge the battery to 100% regardless, and keep in batt first mode for the duration of the slots.
+
+    
     current_soc = get_battery_soc() # test
-    tomorrow_solar = 11# get_solar_production_tomorrow() # test
-    typical_usage = 14.0 # kWh
+    tomorrow_solar = 13 # get_solar_production_tomorrow() # Need to mock this out for testing
+    #typical_usage = 14.0 # kWh 
+    typical_usage = get_local_load_today() # This bases tomorrow on today.  That's probably not realistic. Inverter knows grand total power usage. If we can find uptime then we can work out the average.
     if battery_size is None:
         battery_size = get_battery_size()
     # We need 25% of the battery to get through the night. 00:00 to 08:00
     print(f"Tomorrow's solar production is {tomorrow_solar} kWh")
     print(f"Typical usage is {typical_usage} kWh")
-    spare_solar = tomorrow_solar - typical_usage
-    if spare_solar < 0: spare_solar = 0
-    max_additional_charge = spare_solar / battery_size * 100
-    print(f"Leaving {spare_solar} kWh to top up the battery")
-    print(f"Battery capacity is: {battery_size} kWh")
-    print(f"Which means we can add max. {max_additional_charge}% to the battery tomorrow.")
-    
-    required_charge_percent = 100 - max_additional_charge
-    if required_charge_percent < 0: required_charge_percent = 0
-    required_charge_kw = (battery_size / 100) * required_charge_percent
-    required_charge_time = int(round((required_charge_kw / 2.7) * 2) / 2) # hours
-    print(f"Required charge is {required_charge_percent}%")
-    print(f"Required charge is {required_charge_kw} kWh")
-    print(f"Required charge time is {required_charge_time} hours")
-    print(f"Current battery SOC is {current_soc}%")
 
+    battery_run_time_remaining = (current_soc - 10) / 5 # 5% per hour.  Might minus a higher number to add a safety margin
+    print(f"Battery run time remaining: {battery_run_time_remaining} hours")
+    
     now = datetime.datetime.utcnow().replace(tzinfo=pytz.utc)
     print(f"Now is {now}")
     if now.hour <= 23:
-        tomorrow_8am = now + datetime.timedelta(days=1)
+        tomorrow_8am = now + datetime.timedelta(days=1) # TODO: Use solar forecast to work out when we can start generating instead of "8am"
     else:
         tomorrow_8am = now
-
     tomorrow_8am = tomorrow_8am.replace(hour=8, minute=0, second=0, microsecond=0)
     print(f"Tomorrow 8am is {tomorrow_8am}")
-    
     hours_to_useable_solar = round((((tomorrow_8am - now).total_seconds() / 3600) + 0.5) * 2) / 2
     print(f"Hours_to_useable_solar: {hours_to_useable_solar}")
-    # How much battery % per hour?
-    battery_percent_per_hour_available = (current_soc-10) / hours_to_useable_solar # Last 10% is unusable
-    print(f"How much battery % can we use per hour until we have solar again?: {battery_percent_per_hour_available}")
-    # TODO:  It would be useful if we can say that this script isn't run until solar is low or zero.  Then we can assume that
-    # the battery won't get any more charge for the rest of the day.  Then we can make predictions about when the battery will run out.
-    battery_run_time_remaining = (current_soc - 10) / 5 # 5% per hour.  Might minus a higher number to add a safety margin
-    print(f"Battery run time remaining: {battery_run_time_remaining} hours")
+    soc_at_useable_solar = current_soc - (hours_to_useable_solar * 5)
 
+    spare_solar = tomorrow_solar - typical_usage
+    if spare_solar < 0:
+        # We need some battery power tomorrow to make up the difference
+        # How much battery power do we need?  How do we work that out?
+        additional_battery_power = abs(spare_solar)
+        additional_battery_charge_percent = round(additional_battery_power / battery_size * 100) + 10 + 10
+        print(f"\tTomorrow we need to use {additional_battery_power} kWh from the battery")
+        print(f"\tThat's {additional_battery_charge_percent}% of the battery")# including a buffer")
+        # TODO: Set this as the max soc.  Then we need to select the cheapest slots over night and it doesn't really matter how long, as long as it's at least long
+        # enough to get the battery to the required charge.
+    # else:
+    #     print("We don't need to use any battery power tomorrow")
+    #     print(f"We have {spare_solar} kWh spare solar")
+    #     additional_battery_charge_percent = 25 # We need to leave 25% of the battery to get through the night. 00:00 to 08:00
+    #     # This doesn't mean that we shouldn't switch to batt first mode over night if the slots are cheap enough we should still use them.
+    
+    
+    # The below assumes that we need to go in to the next day with a full battery.  Perhaps that isn't the case?
+    # We need to know how much additional power we are going to need tomorrow from the battery in order to meet our
+    # typical usage.  We can then work out how much battery we need going in to the day.
 
-    if battery_run_time_remaining > hours_to_useable_solar and required_charge_percent == 0:
+    print(f"We need to add {additional_battery_charge_percent - soc_at_useable_solar}% to the battery")
+    print(f"Current battery SOC is {current_soc}%")
+    
+    required_charge_kw = (battery_size / 100) * (additional_battery_charge_percent - soc_at_useable_solar)
+    required_charge_time = round((required_charge_kw / 2.7) * 2) / 2 # hours
+    print(f"Required final charge is {additional_battery_charge_percent}%")
+    set_max_soc(additional_battery_charge_percent, dummy)
+    print(f"Required charge is {required_charge_kw} kWh based on current SOC")
+    print(f"Required charge time is {required_charge_time} hours based on current SOC")
+
+    
+    if battery_run_time_remaining > hours_to_useable_solar and additional_battery_charge_percent < 1:
         print("The battery will last until sunrise, and there will be enough solar tomorrow to charge.  Don't need to charge tonight.")
         # TODO: If there is a period of very cheap electricity (less than the export price perhaps, negative, etc) then charge the battery during those slots anyway.
         # TODO: If the electricity is cheaper than gas, also turn on the immersion.
-        return False
-    
-    elif required_charge_percent > 0: # TODO Need to better understand what number should go here
-        # Do we care if the battery runs out before the cheapest charging time?  Probably not actually.
-        # We could do, and that will complicate things a bit, but it is a possibility.  Just need to look for charging slots that are earlier than the battery run out time.
-        # The downside is that we might miss out on the cheapest charging slots.
-        # What we do need to do though is adjust the charging level to account for the time between the end of the cheap charging slot and sunrise o'clock.
-        slots = prices.get_economy_slots(max_slots=(required_charge_time*2),end_time=tomorrow_8am)
-        print(f"Slots:\n{slots}")
-        end_of_charge = slots.tail(1)['end_time'].item()
-        print(f"End of charge: {end_of_charge}")
-        hours_from_end_of_charge_until_sunrise = (tomorrow_8am - end_of_charge).total_seconds() / 3600
-        print(f"Hours from end of charge until sunrise: {hours_from_end_of_charge_until_sunrise}")
-        # How much battery % will this take?
-        additional_batt_percent_needed = hours_from_end_of_charge_until_sunrise * 5
-        additional_kw_needed = (battery_size / 100) * additional_batt_percent_needed
-        print(f"Additional kw needed: {additional_kw_needed}")
-        # How much charge time will this take?
-        additional_charge_time = round((additional_kw_needed / 2.7) * 2) / 2 # hours
-        print(f"Additional charge time: {additional_charge_time}")
-        extra_slots = prices.get_economy_slots(max_slots=(additional_charge_time*2),start_time=end_of_charge)
-        print(f"Extra slots:\n{extra_slots}")
-        average_price = extra_slots['value_inc_vat'].mean()
-        print(f"Average price of extra slots: {average_price}")
-        min_price = prices.get_min_price()
-        print(f"Lowest unit cost available now: {min_price}")
-        if average_price < (min_price * 1.1):
-            print(f"Cheapest price: {prices.min_price.values[0]}")
-            print("Average price of extra slots is within 10% of the cheapest price.  Adding extra slots.")
-            slots = slots.append(extra_slots)
-            slots = slots.sort_values(by='start_time')
-        else:
-            print("Average price of extra slots is not within 10% of the cheapest price.  Not adding extra slots.")
-        
-        print(f"Final auto slots are:\n{slots}")
+    else:
+        print("The battery won't last until sunrise plus we must charge tonight anyway.")
+        start_time = now + datetime.timedelta(hours=battery_run_time_remaining) # We have to start before this time or the battery will run out
+        slots = prices.get_economy_slots(max_slots=(required_charge_time * 2), end_time=tomorrow_8am, start_time=start_time)
+        print(f"Slots: {slots}")
         slots = merge_slots(slots)
-        print(f"Final auto slots after merge:\n{slots}")
+        print(f"Merged slots: {slots}")
+        start_of_cheap_slots = slots.start_time.min()
+        # So by start_of_cheap_slots the battery will have drained. The target charge has not changed, but the time to get there might have.
+        # Can we will charge before 8am?
+        battery_at_start_of_charge_slot = current_soc - (5 * (start_of_cheap_slots - now).total_seconds() / 3600)
+        print(f"Battery at start of charge slot: {battery_at_start_of_charge_slot}%")
+        power_needed_to_charge = (battery_size / 100) * (additional_battery_charge_percent - battery_at_start_of_charge_slot)
+        print(f"Power needed to charge: {power_needed_to_charge} kWh")
+        required_charge_time = round((power_needed_to_charge / 2.7) * 2) / 2 # hours
+        print(f"Charge time: {required_charge_time} hours")
+        total_duration_of_slots = (slots.end_time.max() - slots.start_time.min()).total_seconds() / 3600
+        print(f"Total duration of slots: {total_duration_of_slots}")
+        if total_duration_of_slots < required_charge_time:
+            print("We don't have enough slots to charge the battery.  We need to recompute the slots.")
+            # We need a "no later than" start time ideally, where it can be earlier than that if needed.
+            # I haven't worked out how to do that yet.  For now we will just use the start of the first slot minus the new duration as the start time.
+            new_start_time = slots.start_time.min() - datetime.timedelta(hours=(required_charge_time+1))
+            print(f"New start time: {new_start_time}")
+            slots = prices.get_economy_slots(max_slots=(required_charge_time * 2), end_time=tomorrow_8am, start_time=new_start_time)
+            print(f"New slots: {slots}")
+            slots = merge_slots(slots)
+            print(f"New merged slots: {slots}")
+            start_of_cheap_slots = slots.start_time.min()
+
+
+          
+    
+    # TODO:  It would be useful if we can say that this script isn't run until solar is low or zero.  Then we can assume that
+    # the battery won't get any more charge for the rest of the day.  Then we can make predictions about when the battery will run out.
+    
+
+    
+    # elif additional_battery_charge_percent > 0: # TODO Need to better understand what number should go here
+    #     # Do we care if the battery runs out before the cheapest charging time?  Probably not actually.
+    #     # We could do, and that will complicate things a bit, but it is a possibility.  Just need to look for charging slots that are earlier than the battery run out time.
+    #     # The downside is that we might miss out on the cheapest charging slots.
+    #     # What we do need to do though is adjust the charging level to account for the time between the end of the cheap charging slot and sunrise o'clock.
+    #     slots = prices.get_economy_slots(max_slots=(required_charge_time*2),end_time=tomorrow_8am)
+    #     print(f"Slots:\n{slots}")
+    #     end_of_charge = slots.tail(1)['end_time'].item()
+    #     print(f"End of charge: {end_of_charge}")
+    #     hours_from_end_of_charge_until_sunrise = (tomorrow_8am - end_of_charge).total_seconds() / 3600
+    #     print(f"Hours from end of charge until sunrise: {hours_from_end_of_charge_until_sunrise}")
+    #     # How much battery % will this take?
+    #     additional_batt_percent_needed = hours_from_end_of_charge_until_sunrise * 5
+    #     additional_kw_needed = (battery_size / 100) * additional_batt_percent_needed
+    #     print(f"Additional kw needed: {additional_kw_needed}")
+    #     # How much charge time will this take?
+    #     additional_charge_time = round((additional_kw_needed / 2.7) * 2) / 2 # hours
+    #     print(f"Additional charge time: {additional_charge_time}")
+    #     extra_slots = prices.get_economy_slots(max_slots=(additional_charge_time*2),start_time=end_of_charge, end_time=tomorrow_8am)
+    #     print(f"Extra slots:\n{extra_slots}")
+    #     average_price = extra_slots['value_inc_vat'].mean()
+    #     print(f"Average price of extra slots: {average_price}")
+    #     min_price = prices.get_min_price()
+    #     print(f"Lowest unit cost available now: {min_price}")
+    #     if average_price < (min_price * 1.1):
+    #         print(f"Cheapest price: {prices.min_price.values[0]}")
+    #         print("Average price of extra slots is within 10% of the cheapest price.  Adding extra slots.")
+    #         slots = slots.append(extra_slots)
+    #         slots = slots.sort_values(by='start_time')
+    #     else:
+    #         print("Average price of extra slots is not within 10% of the cheapest price.  Not adding extra slots.")
+        
+    #     print(f"Final auto slots are:\n{slots}")
+    #     slots = merge_slots(slots)
+    #     print(f"Final auto slots after merge:\n{slots}")
 
             #print(f"New slots:\n{slots}")
 
 
     # TODO: Always charge when power is super cheap (lower than export cost minus a bit?)        
-    total_duration_of_slots = slots.end_time.max() - slots.start_time.min() # .total_seconds() / 3600
-    print(f"Total duration of slots: {total_duration_of_slots}")
+
     set_charging(slots, dummy)
 
     
@@ -598,7 +853,7 @@ def main():
     if args.auto:
         if prices is None:
             prices = Prices()
-        auto_charge(prices, args.dummy)
+        new_auto_charge(prices, args.dummy)
     if args.influx:
         if prices is None:
             prices = Prices()
