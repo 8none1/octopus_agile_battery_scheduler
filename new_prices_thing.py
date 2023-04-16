@@ -14,14 +14,57 @@ POWER_RESERVE_IN_CASE_OF_POWERCUT_HOURS = 2
 BATTERY_CHARGE_RATE = 2.7 # kW/h
 BATTERY_CAPACITY = 13 # kWh
 
-def plan():
+def get_current_battery_charge():
+    # Battery state of charge s held in register 1014
+    return 0
+    client = ModbusTcpClient(inverter_addr)
+    client.connect()
+    results = client.read_input_registers(1014, 1, slave=1)
+    client.close()
+    soc = results.registers[0]
+    battery_kwh = 13 / 100 * soc
+    print(f"Current battery kwh: {battery_kwh}")
+
+
+def get_forecast_solar_prediction():
+    url = "https://api.forecast.solar/estimate/watthours/day/52.1322466021396/-0.21998598515728754/27/-80/6.720"
+    # Might change this to use the per-hour data.  Then we can see how much solar is left for the day.
+    # That might mean signing up for an account, then we can hit the API once a minute if we really want to
+    headers = {"Accept": "application/json"}
+    r = requests.get(url, headers=headers)
+    wh = r.json()['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
+    return wh / 1000
+
+
+def actually_get_prices_from_octopus(start_time, end_time):
+    base_url = "https://api.octopus.energy/v1"
+    product_code = "AGILE-FLEX-22-11-25"
+    tariff_code = "E-1R-AGILE-FLEX-22-11-25-A" # https://api.octopus.energy/v1/products/AGILE-FLEX-22-11-25
+    
+    agile_price_url = f"{base_url}/products/{product_code}/electricity-tariffs/{tariff_code}/standard-unit-rates/"
+    url_params = {
+        "period_from": start_time,
+        "period_to": end_time
+    }
+    r = requests.get(agile_price_url, params=url_params)
+    if r.status_code == 200:
+        prices_dict = r.json()
+        return prices_dict
+    else:
+        raise Exception(
+            f"Failed to fetch from Octopus with this complaint: {r.text}")
+
+
+def plan(electricity_provider_fn=actually_get_prices_from_octopus,
+         get_forecast_fn=get_forecast_solar_prediction,
+         get_battery_charge_fn=get_current_battery_charge):
     # Get the prices from Octopus
-    electricity_prices_slots = get_prices_from_octopus() # returns a pandas dataframe
+    electricity_prices_slots = get_prices_from_octopus(electricity_provider_fn=electricity_provider_fn) # returns a pandas dataframe
     free_electricity_slots   = electricity_prices_slots.drop(electricity_prices_slots[electricity_prices_slots.cost  > 0].index)
     less_than_gas_slots      = electricity_prices_slots.drop(electricity_prices_slots[electricity_prices_slots.cost  > gas_price].index)
     slots_dict = {'all': electricity_prices_slots, 'free': free_electricity_slots, 'less_than_gas': less_than_gas_slots}
-    slots_dict['shortfall'] = get_shortfall()
-    slots_dict['battery_kwh_remaining'] = get_current_battery_charge()
+    slots_dict['shortfall'] = get_shortfall(get_forecast_fn=get_forecast_fn)
+    slots_dict['battery_kwh_remaining'] = get_battery_charge_fn()
     slots_dict['daily_load'] = get_lifetime_average_daily_load()
     return slots_dict
 
@@ -100,8 +143,7 @@ def execute(calculation_dict):
     print(f"Battery charge slots: {battery_charge_slots}")
 
 
-
-def get_prices_from_octopus(start_time = None, end_time = None):
+def get_prices_from_octopus(start_time = None, end_time = None, electricity_provider_fn=actually_get_prices_from_octopus):
     # Get the prices from Octopus
     # TODO: move the product code etc to either a config file or a command line argument, or pull it from the API
     if start_time is None:
@@ -114,39 +156,16 @@ def get_prices_from_octopus(start_time = None, end_time = None):
     print(f"Start time: {start_time}")
     print(f"End time: {end_time}")
 
-    base_url = "https://api.octopus.energy/v1"
-    product_code = "AGILE-FLEX-22-11-25"
-    tariff_code = "E-1R-AGILE-FLEX-22-11-25-A" # https://api.octopus.energy/v1/products/AGILE-FLEX-22-11-25
+    prices_dict = electricity_provider_fn(start_time, end_time)
+    start_time_list = pd.DatetimeIndex(x['valid_from'] for x in prices_dict['results'])
+    end_time_list   = pd.DatetimeIndex(x['valid_to']   for x in prices_dict['results'])
+    value_inc_vat   = [x['value_inc_vat']*10000 for x in prices_dict['results']]
+    electricity_prices_slots = pd.DataFrame({'start_time':start_time_list, 'end_time': end_time_list, 'cost': value_inc_vat})
+    electricity_prices_slots['duration'] = electricity_prices_slots.end_time - electricity_prices_slots.start_time
+    electricity_prices_slots.set_index('start_time', inplace=True)
+    electricity_prices_slots.sort_values(by=['start_time'], inplace=True)
+    return electricity_prices_slots
     
-    agile_price_url = f"{base_url}/products/{product_code}/electricity-tariffs/{tariff_code}/standard-unit-rates/"
-    url_params = {
-        "period_from": start_time,
-        "period_to": end_time
-    }
-    r = requests.get(agile_price_url, params=url_params)
-    if r.status_code == 200:
-        prices_dict = r.json()
-        start_time_list = pd.DatetimeIndex(x['valid_from'] for x in prices_dict['results'])
-        end_time_list   = pd.DatetimeIndex(x['valid_to']   for x in prices_dict['results'])
-        value_inc_vat   = [x['value_inc_vat']*10000 for x in prices_dict['results']]
-        electricity_prices_slots = pd.DataFrame({'start_time':start_time_list, 'end_time': end_time_list, 'cost': value_inc_vat})
-        electricity_prices_slots['duration'] = electricity_prices_slots.end_time - electricity_prices_slots.start_time
-        electricity_prices_slots.set_index('start_time', inplace=True)
-        electricity_prices_slots.sort_values(by=['start_time'], inplace=True)
-        return electricity_prices_slots
-    
-    else:
-        print(f"Body: {r.text}")
-        raise Exception(f"Failed to get Octopus prices. Error: {r.status_code}")
-
-def get_forecast_solar_prediction():
-    url = "https://api.forecast.solar/estimate/watthours/day/52.1322466021396/-0.21998598515728754/27/-80/6.720"
-    # Might change this to use the per-hour data.  Then we can see how much solar is left for the day.
-    # That might mean signing up for an account, then we can hit the API once a minute if we really want to
-    headers = {"Accept": "application/json"}
-    r = requests.get(url, headers=headers)
-    wh = r.json()['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
-    return wh / 1000
 
 def get_lifetime_average_daily_load():
     return 20
@@ -178,45 +197,24 @@ def get_local_load_today():
     print(f"Local load today: {int(inv1/10)}")
     return int(inv1/10)
 
-def get_shortfall():
+def get_shortfall(get_forecast_fn=get_forecast_solar_prediction):
     # How much power in kwh do we need tomorrow?
     # Look at current usage over today to get an indication of average usage
     daily_kwh_required = get_lifetime_average_daily_load() # get_local_load_today()
     print(f"Daily kWh required: {daily_kwh_required}")
     # How much of that is solar?
-    solar_production_tomorrow = get_forecast_solar_prediction()
+    solar_production_tomorrow = get_forecast_fn()
     print(f"kWh from solar tomorrow: {solar_production_tomorrow}")
     # How much battery do we need to fill in?
     power_shortfall = daily_kwh_required - solar_production_tomorrow
     print(f"Power shortfall: {power_shortfall}")
     return power_shortfall
-    # if power_shortfall < 0:
-    #     print("We have enough solar for tomorrow")
-    #     batt_percent_soc_needed_for_tomorrow = 0
-    # else:
-    #     print("We need to use the battery tomorrow")
-    #     power_shortfall = abs(power_shortfall)
-    #     batt_size = get_battery_size()
-    #     print(f"Battery size: {batt_size}")
-    #     batt_percent_soc_needed_for_tomorrow = ((power_shortfall * 1.1 / batt_size) * 100) + 10 # 10% deadzone and 10% buffer.  This will need tweaking
-    # print(f"Battery SOC needed for tomorrow: {batt_percent_soc_needed_for_tomorrow}")
-    # return math.ceil(batt_percent_soc_needed_for_tomorrow)
-
-def get_current_battery_charge():
-    # Battery state of charge s held in register 1014
-    return 0
-    client = ModbusTcpClient(inverter_addr)
-    client.connect()
-    results = client.read_input_registers(1014, 1, slave=1)
-    client.close()
-    soc = results.registers[0]
-    battery_kwh = 13 / 100 * soc
-    print(f"Current battery kwh: {battery_kwh}")
 
 
-slots_dict = plan()
-calculation_dict  = calculation(slots_dict)
-execute_dict = execute(calculation_dict)
+if __name__ == "__main__":
+    slots_dict = plan()
+    calculation_dict  = calculation(slots_dict)
+    execute_dict = execute(calculation_dict)
 
 
 
