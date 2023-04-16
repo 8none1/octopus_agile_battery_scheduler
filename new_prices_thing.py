@@ -103,6 +103,14 @@ def calculation(slots_dict):
     
     hot_water_slots = less_than_gas_slots.copy()
     hot_water_slots.sort_values(by=['start_time'], inplace=True)
+
+    # Add hot water slots to battery slots BEFORE we coalesce the hot water slots
+    battery_charge_slots = pd.concat([battery_charge_slots, hot_water_slots])
+    battery_charge_slots.sort_values(by=['start_time'], inplace=True)
+    battery_charge_slots = battery_charge_slots.drop_duplicates(subset='end_time', keep="first")
+    max_battery_charge_percent = math.ceil((power_needed / BATTERY_CAPACITY) * 100)
+
+
     if not hot_water_slots.empty:
         hot_water_slots.reset_index(drop=True, inplace=True)
         slot_duration = hot_water_slots.head(1)['duration']
@@ -119,27 +127,15 @@ def calculation(slots_dict):
             else:
                 print("Too long, do something")
             
-    
 
-    battery_charge_slots = pd.concat([battery_charge_slots, hot_water_slots])
-    battery_charge_slots.sort_values(by=['start_time'], inplace=True)
-    battery_charge_slots = battery_charge_slots.drop_duplicates(subset='end_time', keep="first")
-    max_battery_charge_percent = math.ceil((power_needed / BATTERY_CAPACITY) * 100)
 
     dishwasher_slots = battery_charge_slots.copy()
-    print("========== dishwasher_slots before")
-    print(dishwasher_slots)
-    dishwasher_slots = dishwasher_slots.rolling('2h', min_periods=4, on='start_time').mean()
-    print("========== dishwasher_slots after xx")
-    print(dishwasher_slots)
+    dishwasher_slots = dishwasher_slots.set_index('start_time')
+    dishwasher_slots = dishwasher_slots.rolling('2h', min_periods=4, on=dishwasher_slots.index).mean()
     dishwasher_slots = dishwasher_slots.dropna()
-    dishwasher_slots = dishwasher_slots.rename(columns={'start_time':'end_time'})
-    print("========== dishwasher_slots after renAME")
-    print(dishwasher_slots)
-    dishwasher_slots['start_time'] = dishwasher_slots["end_time"] - datetime.timedelta(hours=2)
+    dishwasher_slots = dishwasher_slots.reset_index()
+    dishwasher_slots['start_time'] = dishwasher_slots["start_time"] - datetime.timedelta(minutes=90)
     dishwasher_slots.sort_values(by=['start_time'], inplace=True)
-    print("========== dishwasher_slots final here I am")
-    print(dishwasher_slots)
 
     calculation_dict = {'battery_charge_slots': battery_charge_slots, 'hot_water_slots': hot_water_slots, 'dishwasher_slots': dishwasher_slots, 'max_battery_charge_percent': max_battery_charge_percent, 'all_slots': electricity_prices_slots}
     return calculation_dict
