@@ -135,6 +135,26 @@ for e in range(0, len(results), 2):
     #print(a*1000)
     a += 2
 
+print("\n\nWork time total")
+results = client.read_input_registers(57, 2, slave=1).registers
+sum = results[0] << 16 | results[1]
+print(f"Register: 57 : {sum}")
+print(f"Register: 57 : {(sum/2)/60/60} hours")
+
+print("\n\nLoad load total")
+results = client.read_input_registers(1062, 2, slave=1).registers
+print(results)
+sum = results[0] << 16 | results[1]
+print(f"Register: 1062 : {sum/10}kWh")
+
+runtime    = client.read_input_registers(57, 2, slave=1).registers
+total_load = client.read_input_registers(1062, 2, slave=1).registers
+runtime = ((runtime[0] << 16 | runtime[1]) / 2) / 60 / 60 # Reading is in 0.5 second increments.  Convert to hours.
+total_load = (total_load[0] << 16 | total_load[1]) / 10 # Reading is in 0.1kWh increments.  Convert to kWh.
+print(f"Runtime: {runtime} hours\nTotal load: {total_load} kWh")
+average_load = total_load / runtime
+print(f"Average load: {average_load} kWh")
+
 
 
 client.close()

@@ -192,6 +192,12 @@ class Prices:
         #economy_slots.reset_index(drop=True, inplace=True)
         #self.economy_slots = economy_slots
         return economy_slots
+    
+    def get_free_slots(self):
+        free_slots = self.prices.sort_values(by="value_inc_vat").drop(self.prices[self.prices.value_inc_vat > 0].index)
+        free_slots.sort_values(by="start_time", inplace=True)
+        free_slots.reset_index(drop=True, inplace=True)
+        return free_slots
 
     def get_super_cheap_slots(self):
         # The purpose of this function is to find those times where electricity is really cheap.
@@ -217,6 +223,9 @@ def merge_slots(slots):
     # Each slot must be the same duration.
     # TODO: use the duration col instead of working it out?
     #slots.drop(columns=['duration'], inplace=True)
+    if slots.empty:
+        print("No slots to merge")
+        return slots
     slots.sort_values(by="start_time", inplace=True)
     slots.reset_index(drop=True, inplace=True)
     slot_duration = slots.head(1)['duration']
@@ -301,6 +310,8 @@ def get_current_charging_slots():
 def set_charging(slots, dummy=True):
     print("Setting charging")
     charging_slots_list = []
+    slots.sort_values(by="start_time", inplace=True)
+    slots.reset_index(drop=True, inplace=True)
     for r in slots.itertuples():
         start_hour = int(r.start_time.strftime('%H'))
         start_minute = int(r.start_time.strftime('%M'))
@@ -325,9 +336,11 @@ def set_charging(slots, dummy=True):
     write_to_inverter(1018, b, dummy)
 
 def set_max_soc(soc, dummy):
-    if soc < 1 or soc > 100:
+    if soc < 1:
         print(f"Invalid SOC: {soc}")
         return False
+    if soc > 100:
+        soc = 100
     print(f"Setting max SOC to {soc}%")
     write_to_inverter(1091, [soc], dummy)
 
@@ -344,6 +357,23 @@ def get_local_load_today():
     print(f"Local load today: {int(inv1/10)}")
     return int(inv1/10)
 
+def get_lifetime_average_load():
+    # TODO: test this
+    # Note: actual over night usage without DW or WM: 325W/h  This is coming out at about 800W.  So as a hack, let's halve it in the auto bit.
+    # This suggests that 3/4 of the power usage is during the day, which makes sense.
+    if not MODBUS:
+        return False
+    client = ModbusTcpClient(inverter_addr)
+    client.connect()
+    runtime    = client.read_input_registers(57, 2, slave=1).registers
+    total_load = client.read_input_registers(1062, 2, slave=1).registers
+    client.close()
+    runtime = ((runtime[0] << 16 | runtime[1]) / 2) / 60 / 60 # Reading is in 0.5 second increments.  Convert to hours.
+    total_load = (total_load[0] << 16 | total_load[1]) / 10 # Reading is in 0.1kWh increments.  Convert to kWh.
+    print(f"Total inverter running time: {runtime} hours\nTotal load: {total_load} kWh")
+    average_load = total_load / runtime
+    print(f"Average load: {average_load} kWh")
+    return average_load
 
 def convert_to_local_timezone(slots):
     local_tz = pytz.timezone("Europe/London")
@@ -364,6 +394,7 @@ def parse_args():
     mode_group.add_argument("-4", "--4hour", dest="fourhour", help="Program the cheapest 4 hour charging schedule possible", action="store_true")
     mode_group.add_argument("-2", "--2hour", dest="twohour", help="Program the cheapest 2 hour charging schedule possible", action="store_true")
     mode_group.add_argument("-a", "--auto", dest="auto", help="Program the cheapest charging schedule possible taking in to account solar conditions and current soc", action="store_true")
+    mode_group.add_argument("-f", "--free", dest="free", help="Program slots where the electricity is free!", action="store_true")
 
     config_group = parser.add_argument_group("Configuration")
     config_group.add_argument("-c", "--cheap", dest="cheap", help="Set the threshold for cheap electricity in p/kWh.  Default is 15.0", type=float)
@@ -479,8 +510,11 @@ def new_auto_charge(prices, dummy):
     
     # How long until the current battery charge is depleted? Therefore what time to we need to start charging by?
     
-    avg_kw_per_hour = get_local_load_today() / datetime.datetime.utcnow().hour
+    #avg_kw_per_hour = get_local_load_today() / datetime.datetime.utcnow().hour
+    avg_kw_per_hour = get_lifetime_average_load()
     print(f"Current average kW per hour usage: {avg_kw_per_hour}")
+    print("But we are assuming that we're charging over night, so halve that for typical night time usage")
+    avg_kw_per_hour = avg_kw_per_hour / 2
     batt_soc = get_battery_soc() - 10# - 10 # 10% unusable 10% buffer
     print(f"Battery SOC: {batt_soc}")
     battery_kwh_remaining = batt_size * (batt_soc / 100)
@@ -499,7 +533,7 @@ def new_auto_charge(prices, dummy):
     # Forget all this for now, it's unnecessary.  We should calculate the charge time based 0 -> required SOC.  Then we will already have a bit of lee-way
     ##power_to_add_to_battery = (batt_percent_soc_needed_for_tomorrow / 100) * batt_size
     power_to_add_to_battery = (batt_size / 100) *  batt_percent_soc_needed_for_tomorrow
-    print(f"Need to add: {power_to_add_to_battery} kW/h to the battery")
+    print(f"Need to add: {power_to_add_to_battery} kW/h to the battery") # TODO: This assumes the battery will be flat tomorrow morning despite what I said above
     time_to_add_to_battery = round(power_to_add_to_battery / 2.7 * 2) / 2 # max ac charge rate is 2.7 kW/h
     print(f"Time needed to add that: {time_to_add_to_battery}")
 
@@ -536,8 +570,10 @@ def new_auto_charge(prices, dummy):
             tomorrow_8am = now
         tomorrow_8am = tomorrow_8am.replace(hour=8, minute=0, second=0, microsecond=0)
         if must_charge_before > tomorrow_8am:
-            print("We don't need to charge the battery.  There is enough charge to get us to solar generation time.")
-            return
+            print("We don't need to charge the battery before a specific time.")
+            # What to do here?
+            # We can use the absolute cheapest electricity.  We don't need to worry about when to charge because we know we already have enough power to get to tomorrow.
+            print(f"Get the cheapest electricity available for {time_to_add_to_battery} hours")
         else:
             # We do need to charge the battery.  There is no super cheap power available.
             print(f"Must start before time:\t{must_charge_before}")
@@ -835,7 +871,7 @@ def main():
         print(f"Current battery charge: {get_battery_soc()}%")
     elif args.soc > 0:
         print("Setting max SOC")
-        set_max_soc(args.soc)
+        set_max_soc(args.soc, args.dummy)
     if args.battery: battery_size = args.battery
     if args.economy:
         if prices is None:
@@ -854,6 +890,15 @@ def main():
         if prices is None:
             prices = Prices()
         new_auto_charge(prices, args.dummy)
+    if args.free:
+        if prices is None:
+            prices = Prices()
+        free_slots = prices.get_free_slots()
+        if free_slots.empty:
+            print("No free slots found")
+        else:
+            free_slots = merge_slots(free_slots)
+            set_charging(free_slots, args.dummy)
     if args.influx:
         if prices is None:
             prices = Prices()
@@ -861,7 +906,7 @@ def main():
     if args.prices:
         if prices is None:
             prices = Prices()
-        print("All prices in LOCAL time:")
+        print("All prices in LOCAL time:") # TODO:  No they're not!
         print(prices.prices.to_markdown())
         print("\nCheapest combined TWO HOUR slots in LOCAL time:")
         print(convert_to_local_timezone(prices.get_two_hour_windows()).to_markdown())
