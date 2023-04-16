@@ -102,6 +102,35 @@ class TestPlan(unittest.TestCase):
         self.assertEqual(plan_dict["all"].iloc[0]["cost"], 231525)
         self.assertEqual(plan_dict["daily_load"], 20)
 
+class TestCalculations(unittest.TestCase):
+    def Xtest_standard_calculations(self):
+        CURRENT_BATTERY_PC_FULL = 1
+        TOMORROW_SOLAR_FORECAST_KWH = 16
+        plan_dict = plan(electricity_provider_fn=get_standard_octopus_data,
+                         get_forecast_fn=lambda: TOMORROW_SOLAR_FORECAST_KWH,
+                         get_battery_charge_fn=lambda: CURRENT_BATTERY_PC_FULL)
+        calc_dict = calculation(plan_dict)
+        self.assertEqual(len(calc_dict["battery_charge_slots"]), 0)
+        self.assertEqual(len(calc_dict["hot_water_slots"]), 0)
+        self.assertEqual(len(calc_dict["dishwasher_slots"]), 0)
+        self.assertEqual(calc_dict["max_battery_charge_percent"], 0)
+        self.assertEqual(len(plan_dict["all"]), 48)
+
+    def test_all_free_calculations(self):
+        CURRENT_BATTERY_PC_FULL = 1
+        TOMORROW_SOLAR_FORECAST_KWH = 16
+        plan_dict = plan(electricity_provider_fn=get_all_free_octopus_data,
+                         get_forecast_fn=lambda: TOMORROW_SOLAR_FORECAST_KWH,
+                         get_battery_charge_fn=lambda: CURRENT_BATTERY_PC_FULL)
+        calc_dict = calculation(plan_dict)
+        print(calc_dict)
+        self.assertEqual(len(calc_dict["battery_charge_slots"]), 48)
+        self.assertEqual(len(calc_dict["hot_water_slots"]), 1)
+        self.assertEqual(calc_dict["hot_water_slots"].iloc[0]["start_time"].isoformat(),
+                         "2023-03-28T00:00:00+00:00")
+        self.assertEqual(calc_dict["dishwasher_slots"].iloc[0]["start_time"].isoformat(),
+                         "2023-03-28T00:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

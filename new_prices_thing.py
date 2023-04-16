@@ -32,7 +32,12 @@ def get_forecast_solar_prediction():
     # That might mean signing up for an account, then we can hit the API once a minute if we really want to
     headers = {"Accept": "application/json"}
     r = requests.get(url, headers=headers)
-    wh = r.json()['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
+    j = r.json()
+    if not j["result"]:
+        print("Problem fetching the solar prediction")
+        print(r.text)
+        raise Exception("Solar problem")
+    wh = j['result'][(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')]
     return wh / 1000
 
 
@@ -118,12 +123,16 @@ def calculation(slots_dict):
 
     battery_charge_slots = pd.concat([battery_charge_slots, hot_water_slots])
     battery_charge_slots.sort_values(by=['start_time'], inplace=True)
-    battery_charge_slots = battery_charge_slots.drop_duplicates(subset=['start_time'], keep=False)
+    battery_charge_slots = battery_charge_slots.drop_duplicates(subset='end_time', keep="first")
     max_battery_charge_percent = math.ceil((power_needed / BATTERY_CAPACITY) * 100)
 
     dishwasher_slots = battery_charge_slots.copy()
+    print("========== dishwasher_slots before")
+    print(dishwasher_slots)
     dishwasher_slots = dishwasher_slots.rolling('2h', min_periods=4, on='start_time').mean()
-    dishwasher_slots = dishwasher_slots.dropna()
+    print("========== dishwasher_slots after")
+    print(dishwasher_slots)
+    #dishwasher_slots = dishwasher_slots.dropna()
     dishwasher_slots.sort_values(by=['start_time'], inplace=True)
 
     calculation_dict = {'battery_charge_slots': battery_charge_slots, 'hot_water_slots': hot_water_slots, 'dishwasher_slots': dishwasher_slots, 'max_battery_charge_percent': max_battery_charge_percent, 'all_slots': electricity_prices_slots}
@@ -162,7 +171,6 @@ def get_prices_from_octopus(start_time = None, end_time = None, electricity_prov
     value_inc_vat   = [x['value_inc_vat']*10000 for x in prices_dict['results']]
     electricity_prices_slots = pd.DataFrame({'start_time':start_time_list, 'end_time': end_time_list, 'cost': value_inc_vat})
     electricity_prices_slots['duration'] = electricity_prices_slots.end_time - electricity_prices_slots.start_time
-    electricity_prices_slots.set_index('start_time', inplace=True)
     electricity_prices_slots.sort_values(by=['start_time'], inplace=True)
     return electricity_prices_slots
     
