@@ -130,10 +130,16 @@ def calculation(slots_dict):
     print("========== dishwasher_slots before")
     print(dishwasher_slots)
     dishwasher_slots = dishwasher_slots.rolling('2h', min_periods=4, on='start_time').mean()
-    print("========== dishwasher_slots after")
+    print("========== dishwasher_slots after xx")
     print(dishwasher_slots)
-    #dishwasher_slots = dishwasher_slots.dropna()
+    dishwasher_slots = dishwasher_slots.dropna()
+    dishwasher_slots = dishwasher_slots.rename(columns={'start_time':'end_time'})
+    print("========== dishwasher_slots after renAME")
+    print(dishwasher_slots)
+    dishwasher_slots['start_time'] = dishwasher_slots["end_time"] - datetime.timedelta(hours=2)
     dishwasher_slots.sort_values(by=['start_time'], inplace=True)
+    print("========== dishwasher_slots final here I am")
+    print(dishwasher_slots)
 
     calculation_dict = {'battery_charge_slots': battery_charge_slots, 'hot_water_slots': hot_water_slots, 'dishwasher_slots': dishwasher_slots, 'max_battery_charge_percent': max_battery_charge_percent, 'all_slots': electricity_prices_slots}
     return calculation_dict
