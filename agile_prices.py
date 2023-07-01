@@ -112,7 +112,7 @@ class Prices:
     
     def get_two_hour_windows(self):
         # This finds a contiguous 2 hour window that is the cheapest.
-        two_hour_windows = self.prices.rolling('2h', min_periods=4, on='start_time').mean()
+        two_hour_windows = self.prices.rolling('2h', min_periods=4, on='start_time').mean(numeric_only=True)
         two_hour_windows.dropna(inplace=True)
         two_hour_windows.sort_values(by='value_inc_vat', inplace=True)
         two_hour_windows.drop(two_hour_windows[two_hour_windows.value_inc_vat > self.avg_price].index, inplace=True)
@@ -123,7 +123,7 @@ class Prices:
     
     def get_four_hour_windows(self):
         # This finds a contiguous 4 hour window that is the cheapest.
-        four_hour_windows = self.prices.rolling('4h', min_periods=8, on='start_time').mean()
+        four_hour_windows = self.prices.rolling('4h', min_periods=8, on='start_time').mean(numeric_only=True)
         four_hour_windows.dropna(inplace=True)
         four_hour_windows.sort_values(by='value_inc_vat', inplace=True)
         four_hour_windows.drop(four_hour_windows[four_hour_windows.value_inc_vat > self.avg_price].index, inplace=True)
