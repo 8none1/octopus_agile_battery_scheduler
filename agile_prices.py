@@ -878,7 +878,9 @@ def main():
     if args.economy:
         if prices is None:
             prices = Prices()
-        set_charging(prices.get_economy_slots(), args.dummy)
+        eco = prices.get_economy_slots()
+        eco = merge_slots(eco)
+        set_charging(eco, args.dummy)
         # set_economy_charging(prices)
     if args.fourhour:
         if prices is None:
