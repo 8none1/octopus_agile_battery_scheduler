@@ -8,22 +8,30 @@ import pytz
 from argparse import ArgumentParser
 import math
 
+try:
+    from pymodbus.client import ModbusTcpClient
+    MODBUS = True
+except:
+    print("If you want to control your inverter with this script you need to install pymodbus")
+    MODBUS = False
+
 __version__ = '0.0.1'
-gas_price = 10.2 * 10000 # pence per kWh
+GAS_PRICE = 10.2 * 10000 # pence per kWh
 POWER_RESERVE_IN_CASE_OF_POWERCUT_HOURS = 2
 BATTERY_CHARGE_RATE = 2.7 # kW/h
 BATTERY_CAPACITY = 13 # kWh
+INVERTER_ADDR = "ew11-1"
 
 def get_current_battery_charge():
-    # Battery state of charge s held in register 1014
-    return 0
-    client = ModbusTcpClient(inverter_addr)
+    if not MODBUS:
+        return 0
+    client = ModbusTcpClient(INVERTER_ADDR)
     client.connect()
     results = client.read_input_registers(1014, 1, slave=1)
     client.close()
     soc = results.registers[0]
     battery_kwh = 13 / 100 * soc
-    print(f"Current battery kwh: {battery_kwh}")
+    return battery_kwh
 
 
 def get_forecast_solar_prediction():
@@ -66,15 +74,14 @@ def plan(electricity_provider_fn=actually_get_prices_from_octopus,
     # Get the prices from Octopus
     electricity_prices_slots = get_prices_from_octopus(electricity_provider_fn=electricity_provider_fn) # returns a pandas dataframe
     free_electricity_slots   = electricity_prices_slots.drop(electricity_prices_slots[electricity_prices_slots.cost  > 0].index)
-    less_than_gas_slots      = electricity_prices_slots.drop(electricity_prices_slots[electricity_prices_slots.cost  > gas_price].index)
+    less_than_gas_slots      = electricity_prices_slots.drop(electricity_prices_slots[electricity_prices_slots.cost  > GAS_PRICE].index)
     slots_dict = {'all': electricity_prices_slots, 'free': free_electricity_slots, 'less_than_gas': less_than_gas_slots}
-    slots_dict['shortfall'] = get_shortfall(get_forecast_fn=get_forecast_fn)
-    slots_dict['battery_kwh_remaining'] = get_battery_charge_fn()
     slots_dict['daily_load'] = get_lifetime_average_daily_load()
+    slots_dict['shortfall'] = get_shortfall(get_forecast_fn=get_forecast_fn, avg_load=slots_dict['daily_load'])
+    slots_dict['battery_kwh_remaining'] = get_battery_charge_fn()
     return slots_dict
 
 def calculation(slots_dict):
-    battery_kwh_remaining    = get_current_battery_charge()
     free_electricity_slots   = slots_dict['free']
     less_than_gas_slots      = slots_dict['less_than_gas']
     electricity_prices_slots = slots_dict['all']
@@ -83,7 +90,7 @@ def calculation(slots_dict):
     daily_load               = slots_dict['daily_load']
 
     print(f"Shortfall: {shortfall}")
-    print(f"Current battery charge: {battery_kwh_remaining}")
+    print(f"Current battery charge: {battery_kwh_remaining} kWh")
     print(f"Daily load: {daily_load}")
 
     
@@ -111,21 +118,25 @@ def calculation(slots_dict):
     max_battery_charge_percent = math.ceil((power_needed / BATTERY_CAPACITY) * 100)
 
 
-    if not hot_water_slots.empty:
-        hot_water_slots.reset_index(drop=True, inplace=True)
-        slot_duration = hot_water_slots.head(1)['duration']
-        hot_water_slots['grp_time'] = hot_water_slots.end_time.diff().dt.seconds.gt(slot_duration.dt.seconds[0]).cumsum()
-        hot_water_slots = hot_water_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'cost': 'mean', 'duration': 'sum'})
-        hot_water_slots = hot_water_slots.reset_index(drop=True)
-        print(f"Merged slots:\n {hot_water_slots}")
-        hot_water_times_list = []
-        for index, row in hot_water_slots.iterrows():
-            duration = row['duration']
-            start_time = row['start_time']
-            if duration <= datetime.timedelta(minutes=120):
-                hot_water_times_list.append((start_time, duration))
-            else:
-                print("Too long, do something")
+    # I can't remember why we wanted to merge this together at this point
+    # so commenting it all out.
+    # if not hot_water_slots.empty:
+    #     hot_water_slots.reset_index(drop=True, inplace=True)
+    #     slot_duration = hot_water_slots.head(1)['duration']
+    #     hot_water_slots['grp_time'] = hot_water_slots.end_time.diff().dt.seconds.gt(slot_duration.dt.seconds[0]).cumsum()
+    #     hot_water_slots = hot_water_slots.groupby('grp_time').agg({'start_time': 'min', 'end_time': 'max', 'cost': 'mean', 'duration': 'sum'})
+    #     hot_water_slots = hot_water_slots.reset_index(drop=True)
+    #     print(f"Merged slots:\n {hot_water_slots}")
+    #     df['chunk'] = hot_water_slots.cut()
+    #     hot_water_times_list = []
+    #     for index, row in hot_water_slots.iterrows():
+    #         duration = row['duration']
+    #         start_time = row['start_time']
+    #         if duration <= datetime.timedelta(minutes=120):
+    #             hot_water_times_list.append((start_time, duration))
+    #         else:
+
+    #             print("Too long, do something")
             
 
 
@@ -178,26 +189,25 @@ def get_prices_from_octopus(start_time = None, end_time = None, electricity_prov
     
 
 def get_lifetime_average_daily_load():
-    return 20
     if not MODBUS:
-        return False
-    client = ModbusTcpClient(inverter_addr)
+        return 20
+    client = ModbusTcpClient(INVERTER_ADDR)
     client.connect()
     runtime    = client.read_input_registers(57, 2, slave=1).registers
     total_load = client.read_input_registers(1062, 2, slave=1).registers
     client.close()
     runtime = ((runtime[0] << 16 | runtime[1]) / 2) / 60 / 60 # Reading is in 0.5 second increments.  Convert to hours.
     total_load = (total_load[0] << 16 | total_load[1]) / 10 # Reading is in 0.1kWh increments.  Convert to kWh.
-    print(f"Total inverter running time: {runtime} hours\nTotal load: {total_load} kWh")
+    #print(f"Total inverter running time: {runtime} hours\nTotal load: {total_load} kWh")
     average_load = total_load / runtime # per hour
     average_load = average_load * 24
-    print(f"Average load per day: {average_load} kWh")
+    #print(f"Average load per day: {average_load} kWh")
     return average_load
 
 def get_local_load_today():
-    # if not MODBUS:
-    #     return False
-    client = ModbusTcpClient(inverter_addr)
+    if not MODBUS:
+        return False
+    client = ModbusTcpClient(INVERTER_ADDR)
     client.connect()
     results = client.read_input_registers(1060, 2, slave=1).registers
     #batt_charge = client.read_input_registers(1056, 2, slave=1).registers
@@ -207,10 +217,13 @@ def get_local_load_today():
     print(f"Local load today: {int(inv1/10)}")
     return int(inv1/10)
 
-def get_shortfall(get_forecast_fn=get_forecast_solar_prediction):
+def get_shortfall(get_forecast_fn=get_forecast_solar_prediction, avg_load=None):
     # How much power in kwh do we need tomorrow?
     # Look at current usage over today to get an indication of average usage
-    daily_kwh_required = get_lifetime_average_daily_load() # get_local_load_today()
+    if avg_load is None:
+        daily_kwh_required = get_lifetime_average_daily_load() # get_local_load_today()
+    else:
+        daily_kwh_required = avg_load
     print(f"Daily kWh required: {daily_kwh_required}")
     # How much of that is solar?
     solar_production_tomorrow = get_forecast_fn()

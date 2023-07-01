@@ -849,6 +849,8 @@ def main():
         inverter_addr = args.inverter
     if args.zero:
         zero_charging_slots(args.dummy)
+    if args.dummy:
+        MODBUS = False
     # if args.cheap:
     #     global cheap
     #     cheap = args.cheap

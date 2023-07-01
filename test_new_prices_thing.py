@@ -151,7 +151,7 @@ class TestCalculations(unittest.TestCase):
                          get_battery_charge_fn=lambda: CURRENT_BATTERY_PC_FULL)
         calc_dict = calculation(plan_dict)
         self.assertEqual(len(calc_dict["battery_charge_slots"]), 48)
-        self.assertEqual(len(calc_dict["hot_water_slots"]), 1)
+        self.assertEqual(len(calc_dict["hot_water_slots"]), 48)
         self.assertEqual(calc_dict["hot_water_slots"].iloc[0]["start_time"].isoformat(),
                          "2023-03-28T00:00:00+00:00")
         self.assertEqual(calc_dict["dishwasher_slots"].iloc[0]["start_time"].isoformat(),
@@ -165,11 +165,11 @@ class TestCalculations(unittest.TestCase):
                          get_battery_charge_fn=lambda: CURRENT_BATTERY_PC_FULL)
         calc_dict = calculation(plan_dict)
         self.assertEqual(len(calc_dict["battery_charge_slots"]), 9)
-        self.assertEqual(len(calc_dict["hot_water_slots"]), 2)
+        self.assertEqual(len(calc_dict["hot_water_slots"]), 9)
         self.assertEqual(calc_dict["hot_water_slots"].iloc[0]["start_time"].isoformat(),
                          "2023-03-28T01:00:00+00:00")
         self.assertEqual(calc_dict["hot_water_slots"].iloc[1]["start_time"].isoformat(),
-                         "2023-03-28T08:30:00+00:00")
+                         "2023-03-28T01:30:00+00:00")
         self.assertEqual(calc_dict["dishwasher_slots"].iloc[0]["start_time"].isoformat(),
                          "2023-03-28T08:30:00+00:00")
 
