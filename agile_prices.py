@@ -254,6 +254,8 @@ def sync_inverter_time(dummy=True):
 def zero_charging_slots(dummy=True):
     write_to_inverter(1100, [0]*9, dummy)
     write_to_inverter(1018, [0]*9, dummy)
+    write_to_inverter(1080, [0]*3, dummy)
+
 
 def get_battery_size():
     # I don't know if this works.  It seems to align with my set up, but I don't know if it's correct.
@@ -284,9 +286,18 @@ def get_current_charging_slots():
     client = ModbusTcpClient(inverter_addr)
     client.connect()
     charging_slots = []
+    discharging_slots = []
     charging_slots.extend(client.read_holding_registers(1100, 9, slave=1).registers)
+    discharging_slots.extend(client.read_holding_registers(1080, 3, slave=1).registers)
+    t = client.read_holding_registers(1018, 9, slave=1)
+    print(t.registers)
+    #charging_slots.extend(t.registers)
     charging_slots.extend(client.read_holding_registers(1018, 9, slave=1).registers) # Looks like the docs are wrong here. 1018 is the start of the charging slots not 1017 
+    #charging_slots.extend(client.read_holding_registers(1018, 9, slave=1).registers) # Looks like the docs are wrong here. 1018 is the start of the charging slots not 1017 
     charge_limit = client.read_holding_registers(1091, 1, slave=1).registers[0]
+    discharge_limit = client.read_holding_registers(1071, 1, slave=1).registers[0]
+    discharge_power = client.read_holding_registers(1070, 1, slave=1).registers[0]
+    
     ac_charge_enabled = client.read_holding_registers(1092, 1, slave=1).registers[0]
     results = client.read_holding_registers(45, 7, slave=1)
     year, month, day, hour, minute, second, dow = results.registers
@@ -300,12 +311,26 @@ def get_current_charging_slots():
         enabled = charging_slots[i+2]
         charge_slots_list.append([start_time, end_time, enabled])
 
+    discharge_slots_list = []
+    for i in range(0, len(discharging_slots), 3):
+        start_time = datetime.time(discharging_slots[i] >> 8, discharging_slots[i] & 255)
+        end_time = datetime.time(discharging_slots[i+1] >> 8, discharging_slots[i+1] & 255)
+        enabled = discharging_slots[i+2]
+        discharge_slots_list.append([start_time, end_time, enabled])
+
+    print("\nCharge slots:")
     for each in charge_slots_list:
+        print(f"Slot: {each[0]} - {each[1]} Enabled: {each[2]}")
+
+    print("\nDischarge slots:")
+    for each in discharge_slots_list:
         print(f"Slot: {each[0]} - {each[1]} Enabled: {each[2]}")
 
     print(f"Charge Limit: {charge_limit}")
     print(f"AC Charge Enabled: {ac_charge_enabled}")
     print(f"Inverter time: {inverter_now}")
+    print(f"Discharge min: {discharge_limit}")
+    print(f"Discharge power: {discharge_power}")
 
 def set_charging(slots, dummy=True):
     print("Setting charging")
@@ -837,8 +862,8 @@ def auto_charge(prices, dummy):
 
 def main():
     #global prices
-    #global start_time
-    #global end_time
+    global start_time
+    global end_time
     global battery_size
 
 
@@ -864,6 +889,7 @@ def main():
         if not args.end_time:
             end_time = start_time + datetime.timedelta(hours=4)
     if args.end_time:
+        print("Setting end time")
         end_time = args.end_time
         if not args.start_time:
             start_time = end_time - datetime.timedelta(hours=4)

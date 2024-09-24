@@ -3,7 +3,7 @@
 from pymodbus.client import ModbusTcpClient
 import datetime
 
-client = ModbusTcpClient('ew11-1')
+client = ModbusTcpClient('ew11-2')
 client.connect()
 results = client.read_holding_registers(45, 7, slave=1)
 year, month, day, hour, minute, second, dow = results.registers
@@ -72,24 +72,73 @@ print("^ Time \n\n  Slots v")
 
 # Read battery mode slots
 
+print("\n\nBattery Mode Slots")
 results = client.read_holding_registers(1100, 9, slave=1).registers
 for e in results:
-    if e > 255:
+    if e > 254:
         print(e >> 8, e & 255)
     else:
         print(e)
+print("\n\nBattery Mode Slots")
 results = client.read_holding_registers(1017, 9, slave=1).registers
 for e in results:
     if e > 255:
         print(e >> 8, e & 255)
     else:
         print(e)
+print("Batt levels")
 results = client.read_holding_registers(1091, 1, slave=1).registers
 for e in results:
     if e > 255:
         print(e >> 8, e & 255)
     else:
         print(e)
+
+print("\n\Grid First Slots")
+results = client.read_holding_registers(1026, 9, slave=1).registers
+for e in results:
+    if e > 254:
+        print(e >> 8, e & 255)
+    else:
+        print(e)
+print("\n\Grid First Slots")
+results = client.read_holding_registers(1080, 9, slave=1).registers
+for e in results:
+    if e > 255:
+        print(e >> 8, e & 255)
+    else:
+        print(e)
+print("Batt levels")
+results = client.read_holding_registers(1091, 1, slave=1).registers
+for e in results:
+    if e > 255:
+        print(e >> 8, e & 255)
+    else:
+        print(e)
+
+print("\n\Load First Slots")
+results = client.read_holding_registers(1110, 9, slave=1).registers
+for e in results:
+    if e > 254:
+        print(e >> 8, e & 255)
+    else:
+        print(e)
+print("\n\Load First Slots")
+results = client.read_holding_registers(1080, 9, slave=1).registers
+for e in results:
+    if e > 255:
+        print(e >> 8, e & 255)
+    else:
+        print(e)
+print("Batt levels")
+results = client.read_holding_registers(1091, 1, slave=1).registers
+for e in results:
+    if e > 255:
+        print(e >> 8, e & 255)
+    else:
+        print(e)
+
+
 
 # Battery Info?
 print("\n\nBattery Info")
@@ -155,6 +204,10 @@ print(f"Runtime: {runtime} hours\nTotal load: {total_load} kWh")
 average_load = total_load / runtime
 print(f"Average load: {average_load} kWh")
 
+print("Status:")
+results = client.read_input_registers(0,100, slave=1).registers
+for index, item in enumerate(results):
+    print(f"{index}: {item}")
 
 
 client.close()
